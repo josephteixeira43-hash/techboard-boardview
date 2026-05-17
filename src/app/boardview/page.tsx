@@ -379,6 +379,7 @@ function BoardViewContent() {
         <a href="/" className="text-white/40 hover:text-white text-sm">
           ← Voltar
         </a>
+        <a href={`/schematics/${deviceId}`} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30 hover:bg-yellow-500/20 transition-all"><span className="text-yellow-300 text-xs font-medium">Esquemas Eletricos</span></a>
         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center">
           ⚡
         </div>
@@ -884,3 +885,4 @@ export default function BoardViewPage() {
     </Suspense>
   )
 }
+
