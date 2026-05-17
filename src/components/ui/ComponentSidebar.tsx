@@ -10,7 +10,7 @@ const supabase = createClient(
 );
 
 export interface SchematicFile {
-  id: string;
+  id: string | null;
   name: string;
   type: "electrical_list" | "troubleshooting" | "schematic";
   url: string;
