@@ -85,7 +85,7 @@ export default function SchematicsProPage() {
           const type = f.name.toLowerCase().includes("troubleshoot") ? "troubleshooting"
             : f.name.toLowerCase().includes("electrical") || f.name.toLowerCase().includes("part")
             ? "electrical_list" : "schematic";
-          return { id: f.id, name: f.name.replace(".pdf", "").replace(/_/g, " "), type, url: data.publicUrl, device_id: deviceId };
+          return { id: f.id || f.name, name: f.name.replace(".pdf", "").replace(/_/g, " "), type, url: data.publicUrl, device_id: deviceId };
         });
       setFiles(mapped);
       if (mapped.length > 0) setSelectedFile(mapped[0]);
