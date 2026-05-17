@@ -78,7 +78,7 @@ export default function SchematicsProPage() {
       .from("schematics").list(`${deviceId}/`, { limit: 100 });
 
     if (storageFiles && storageFiles.length > 0) {
-      const mapped: SchematicFile[] = storageFiles
+      const mapped = storageFiles
         .filter(f => f.name.endsWith(".pdf"))
         .map(f => {
           const { data } = supabase.storage.from("schematics").getPublicUrl(`${deviceId}/${f.name}`);
