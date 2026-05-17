@@ -87,8 +87,8 @@ export default function SchematicsProPage() {
             ? "electrical_list" : "schematic";
           return { id: f.id || f.name, name: f.name.replace(".pdf", "").replace(/_/g, " "), type: type as "electrical_list" | "troubleshooting" | "schematic", url: data.publicUrl, device_id: deviceId };
         });
-      setFiles(mapped);
-      if (mapped.length > 0) setSelectedFile(mapped[0]);
+      setFiles(mapped as any);
+      if (mapped.length > 0) setSelectedFile(mapped[0] as any);
     }
     setFilesLoading(false);
   }
