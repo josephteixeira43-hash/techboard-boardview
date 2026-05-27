@@ -28,6 +28,46 @@ export async function getComponents(deviceId: string) {
   return data
 }
 
+export async function saveBoardGeometry(
+  deviceId: string,
+  rows: Array<{
+    component_name: string
+    x: number
+    y: number
+    width?: number
+    height?: number
+    layer?: string
+  }>
+) {
+  if (!rows.length) return
+  const payload = rows.map((r) => ({
+    device_id: deviceId,
+    component_name: r.component_name,
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
+    layer: r.layer ?? 'top',
+    source: 'parsed',
+  }))
+  const { error } = await supabase.from('board_geometry').upsert(payload)
+  if (error && error.code !== '42P01') throw error
+}
+
+export async function getBoardGeometry(deviceId: string) {
+  const { data, error } = await supabase
+    .from('board_geometry')
+    .select('component_name, x, y, width, height, layer, bbox')
+    .eq('device_id', deviceId)
+  if (error) {
+    if (error.code === '42P01' || error.message?.includes('does not exist')) {
+      return []
+    }
+    throw error
+  }
+  return data ?? []
+}
+
 export async function searchComponent(deviceId: string, name: string) {
   const { data, error } = await supabase
     .from('components')

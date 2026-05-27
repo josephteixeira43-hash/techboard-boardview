@@ -2,11 +2,14 @@
   "name": "techboard-boardview",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "electron": "electron .",
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:3000 && cross-env ELECTRON_DEV_URL=http://localhost:3000/boardview electron .\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
@@ -23,11 +26,16 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pdfjs-dist": "^2.10.377",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "electron": "^35.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^8.0.5"
   }
 }

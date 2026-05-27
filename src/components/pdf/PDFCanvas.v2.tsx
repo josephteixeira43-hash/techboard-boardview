@@ -163,11 +163,10 @@ export default function PDFCanvas({
         >
           {/* Canvas PDF */}
           <canvas
-            ref={canvasRef}
-            className="shadow-2xl shadow-black/80 block"
-            style={{ maxWidth: "none", filter: "invert(1) hue-rotate(180deg)" }}
+           ref={canvasRef}
+           className="shadow-2xl shadow-black/80 block"
+           style={{ maxWidth: "none", filter: "invert(1) hue-rotate(180deg) saturate(0.15) contrast(1.3)" }}
           />
-
           {/* Highlights OCR */}
           <AnimatePresence>
             {highlights.map((h, i) => (

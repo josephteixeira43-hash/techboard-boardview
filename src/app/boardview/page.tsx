@@ -1,872 +1,610 @@
 'use client'
-import { useEffect, useState, useRef, useCallback, useMemo, Suspense } from 'react'
+import { useEffect, useState, useCallback, Suspense, useRef, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { getComponents, getVoltages } from '@/lib/queries'
-import { CATEGORY_COLORS } from '@/lib/supabase'
+import { getVoltages } from '@/lib/queries'
+import { useBoardEngine } from '@/hooks/useBoardEngine'
+import { useBoardData } from '@/hooks/useBoardData'
+import { useBoardInteraction } from '@/hooks/useBoardInteraction'
+import { usePCBExtractor } from '@/hooks/usePCBExtractor'
+import { usePCBFromPDF } from '@/hooks/usePCBFromPDF'
+import { usePdfNetGraph } from '@/hooks/usePdfNetGraph'
+import { useTechAI } from '@/hooks/useTechAI'
+import BoardViewer from '@/components/boardview/BoardViewerKonva'
+import RegionOverlayLayer from '@/components/boardview/RegionOverlayLayer'
+import NetGraphOverlayLayer from '@/components/boardview/NetGraphOverlayLayer'
+import ComponentTooltip from '@/components/boardview/ComponentTooltip'
+import ComponentSearchBar from '@/components/boardview/ComponentSearchBar'
+import ComponentInspectorPanel from '@/components/boardview/ComponentInspectorPanel'
+import type { BoardComponent } from '@/types/board'
+import { CATEGORY_COLORS } from '@/lib/constants'
+import { syncRegionsToComputedPositions } from '@/core/pdf/PDFRegionEngine'
+import { SIGNAL_COLORS } from '@/core/pdf/PDFNetGraphEngine'
+import type { PdfNetNode } from '@/types/pdfNetGraph'
+import { OverlaySystem, DEFAULT_OVERLAY, type OverlayState } from '@/core/boardview/OverlaySystem'
 
-type DiagnosticResult = {
-  diagnostico: string
-  componentes: string[]
-  tensoes: { ponto: string; valor: string }[]
-  procedimento: string[]
-  solucao_comum: string
-}
-
-const DEVICE_LABEL = 'Samsung Galaxy A12'
-
-const BOARD_W = 1800
-const BOARD_H = 1200
-const COMP_W = 80
-const COMP_H = 48
-const BOARD_PADDING = 48
-const MIN_ZOOM = 0.25
-const MAX_ZOOM = 3
-const COMP_BG_ALPHA = 0.7
-
-function plateStorageSide(side: string): 'top' | 'bottom' {
-  return side === 'bottom' || side === 'sub_bottom' ? 'bottom' : 'top'
-}
-
-function plateStorageKey(deviceId: string, side: string) {
-  return `techboard-plate-${deviceId}-${plateStorageSide(side)}`
-}
-
-function hexToRgba(hex: string, alpha: number) {
-  const h = hex.replace('#', '')
-  if (h.length !== 6) return `rgba(100, 116, 139, ${alpha})`
-  const r = parseInt(h.slice(0, 2), 16)
-  const g = parseInt(h.slice(2, 4), 16)
-  const b = parseInt(h.slice(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
-}
-
-function isValidCoord(v: unknown): boolean {
-  if (v == null || v === '') return false
-  const n = Number(v)
-  return !Number.isNaN(n) && n !== 0
-}
-
-function hasRealCoords(comp: {
-  x_top?: number | null
-  y_top?: number | null
-  x_bottom?: number | null
-  y_bottom?: number | null
-  side?: string
+function PdfNetsPanel({
+  nets,
+  activeNetId,
+  onHighlight,
+  onClear,
+}: {
+  nets: PdfNetNode[]
+  activeNetId: string | null
+  onHighlight: (netId: string) => void
+  onClear: () => void
 }) {
-  const useBottom = comp.side === 'bottom' || comp.side === 'sub_bottom'
-  if (useBottom && isValidCoord(comp.x_bottom) && isValidCoord(comp.y_bottom)) {
-    return true
-  }
-  return isValidCoord(comp.x_top) && isValidCoord(comp.y_top)
+  if (!nets.length) return null
+  return (
+    <div
+      className="absolute bottom-14 left-3 z-10 max-h-40 overflow-y-auto rounded-lg border font-mono text-[10px]"
+      style={{
+        background: 'rgba(3,6,12,0.92)',
+        borderColor: 'rgba(0,212,255,0.2)',
+        minWidth: 140,
+      }}
+    >
+      <div className="flex items-center justify-between gap-2 px-2 py-1 border-b border-white/10 text-cyan-500/80">
+        <span>PDF NETS ({nets.length})</span>
+        {activeNetId && (
+          <button type="button" onClick={onClear} className="text-white/30 hover:text-white/70">
+            ✕
+          </button>
+        )}
+      </div>
+      {nets.slice(0, 24).map((n) => (
+        <button
+          key={n.netId}
+          type="button"
+          onClick={() => onHighlight(n.netId)}
+          className="flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-white/5"
+          style={{
+            color: activeNetId === n.netId ? n.color : 'rgba(255,255,255,0.55)',
+            background: activeNetId === n.netId ? `${n.color}18` : 'transparent',
+          }}
+        >
+          <span
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ background: SIGNAL_COLORS[n.signalType] }}
+          />
+          <span className="truncate">{n.name}</span>
+          <span className="ml-auto text-white/25">{n.componentIds.length}</span>
+        </button>
+      ))}
+    </div>
+  )
 }
 
-function getRawCoords(comp: {
-  x_top?: number | null
-  y_top?: number | null
-  x_bottom?: number | null
-  y_bottom?: number | null
-  side?: string
+// ─── Overlay Panel ────────────────────────────────────────────────────────────
+
+function OverlayPanel({ overlay, onToggle }: {
+  overlay: OverlayState
+  onToggle: (key: keyof OverlayState) => void
 }) {
-  const useBottom = comp.side === 'bottom' || comp.side === 'sub_bottom'
-  if (useBottom && isValidCoord(comp.x_bottom) && isValidCoord(comp.y_bottom)) {
-    return { x: Number(comp.x_bottom), y: Number(comp.y_bottom) }
-  }
-  return { x: Number(comp.x_top), y: Number(comp.y_top) }
+  const items: { key: keyof OverlayState; label: string; icon: string }[] = [
+    { key: 'showPads',       label: 'Pads',       icon: '◉' },
+    { key: 'showVias',       label: 'Vias',        icon: '⊙' },
+    { key: 'showTraces',     label: 'Traces',      icon: '⌇' },
+    { key: 'showNets',       label: 'NETs',        icon: '⬡' },
+    { key: 'showLabels',     label: 'Labels',      icon: 'Aa' },
+    { key: 'showSilkscreen', label: 'Silk',        icon: '◫' },
+    { key: 'showVoltages',   label: 'Tensões',     icon: '⚡' },
+    { key: 'showGrid',       label: 'Grid',        icon: '⊞' },
+  ]
+
+  return (
+    <div style={{
+      position: 'absolute', bottom: 110, right: 14,
+      background: 'rgba(3,6,12,0.96)',
+      border: '0.5px solid rgba(0,212,255,0.18)',
+      borderRadius: 8, overflow: 'hidden',
+      boxShadow: '0 4px 28px rgba(0,0,0,0.7)',
+      fontFamily: 'monospace', fontSize: 10,
+    }}>
+      <div style={{ padding: '4px 8px', borderBottom: '0.5px solid rgba(0,212,255,0.12)',
+        color: '#2a6090', letterSpacing: '0.07em', display: 'flex', alignItems: 'center', gap: 4 }}>
+        <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#00d4ff' }} />
+        OVERLAYS
+      </div>
+      {items.map(({ key, label, icon }) => {
+        const active = overlay[key]
+        return (
+          <button key={key} onClick={() => onToggle(key)} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            width: '100%', padding: '5px 10px', border: 'none',
+            background: active ? 'rgba(0,212,255,0.08)' : 'transparent',
+            color: active ? '#00d4ff' : 'rgba(255,255,255,0.3)',
+            cursor: 'pointer', fontSize: 10, fontFamily: 'monospace',
+            transition: 'all 0.1s', textAlign: 'left',
+            borderLeft: active ? '2px solid #00d4ff' : '2px solid transparent',
+          }}>
+            <span style={{ fontSize: 11, width: 14, textAlign: 'center' }}>{icon}</span>
+            {label}
+            <span style={{ marginLeft: 'auto', fontSize: 8,
+              color: active ? '#00d4ff' : 'rgba(255,255,255,0.2)' }}>
+              {active ? 'ON' : 'OFF'}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
-function gridPosition(index: number, total: number) {
-  const usableW = BOARD_W - BOARD_PADDING * 2 - COMP_W
-  const usableH = BOARD_H - BOARD_PADDING * 2 - COMP_H
-  const cols = Math.max(1, Math.ceil(Math.sqrt(total * (BOARD_W / BOARD_H))))
-  const rows = Math.ceil(total / cols)
-  const cellW = usableW / cols
-  const cellH = usableH / rows
-  const col = index % cols
-  const row = Math.floor(index / cols)
-  return {
-    x: BOARD_PADDING + col * cellW + Math.max(0, (cellW - COMP_W) / 2),
-    y: BOARD_PADDING + row * cellH + Math.max(0, (cellH - COMP_H) / 2),
-  }
+// ─── Sidebar ──────────────────────────────────────────────────────────────────
+
+function BoardSidebar({ searchBar, diagnostic, setDiagnostic, onDiagnose,
+  diagLoading, diagResult, diagError, sideComponents, categoryCounts }: any) {
+  return (
+    <div className="w-72 border-r border-white/10 flex flex-col gap-4 p-4 overflow-y-auto shrink-0 bg-[#030608]">
+      {searchBar}
+      <div>
+        <div className="text-xs text-white/40 mb-2 tracking-widest font-mono">IA DIAGNÓSTICO</div>
+        <div className="flex flex-col gap-2">
+          <input value={diagnostic} onChange={e => setDiagnostic(e.target.value)}
+            onKeyDown={e => e.key==='Enter'&&onDiagnose()}
+            placeholder="Ex: sem rede, não liga..."
+            className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-purple-500/50 font-mono text-white"/>
+          <button onClick={onDiagnose} disabled={diagLoading}
+            className="px-3 py-2 bg-purple-500/20 border border-purple-500/30 rounded-lg text-purple-400 text-sm hover:bg-purple-500/30 disabled:opacity-50 font-mono">
+            {diagLoading ? 'Analisando...' : 'Diagnosticar'}
+          </button>
+        </div>
+        {diagError && <div className="mt-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3">{diagError}</div>}
+        {diagResult && (
+          <div className="mt-3 bg-white/3 border border-white/10 rounded-lg p-3 max-h-56 overflow-y-auto">
+            <div className="text-[10px] text-white/40 mb-1 font-mono">DIAGNÓSTICO IA</div>
+            <div className="text-xs text-white/80 leading-relaxed whitespace-pre-wrap">{diagResult}</div>
+          </div>
+        )}
+      </div>
+      <div>
+        <div className="text-xs text-white/40 mb-2 tracking-widest font-mono">CATEGORIAS ({sideComponents.length})</div>
+        <div className="space-y-1">
+          {Object.entries(CATEGORY_COLORS).filter(([cat]) => (categoryCounts[cat]??0)>0).map(([cat,color]) => (
+            <div key={cat} className="flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-3 h-3 rounded-full shrink-0" style={{background:color as string}}/>
+                <span className="text-white/60 truncate font-mono">{cat}</span>
+              </div>
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-bold font-mono"
+                style={{background:`${color}22`,color:color as string}}>{categoryCounts[cat]}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="text-[10px] text-white/20 leading-relaxed border-t border-white/5 pt-3 font-mono">
+        Scroll: zoom · Arrastar: mover · Duplo clique: centralizar
+      </div>
+    </div>
+  )
 }
 
-function computeBoardPositions(components: any[]): Map<string, { x: number; y: number }> {
-  const positions = new Map<string, { x: number; y: number }>()
-  const withCoords: { comp: any; x: number; y: number }[] = []
-  const withoutCoords: { comp: any; index: number }[] = []
-
-  components.forEach((comp, index) => {
-    if (hasRealCoords(comp)) {
-      const { x, y } = getRawCoords(comp)
-      withCoords.push({ comp, x, y })
-    } else {
-      withoutCoords.push({ comp, index })
-    }
-  })
-
-  const usableW = BOARD_W - BOARD_PADDING * 2 - COMP_W
-  const usableH = BOARD_H - BOARD_PADDING * 2 - COMP_H
-
-  if (withCoords.length > 0) {
-    let minX = Infinity
-    let minY = Infinity
-    let maxX = -Infinity
-    let maxY = -Infinity
-    withCoords.forEach(({ x, y }) => {
-      minX = Math.min(minX, x)
-      minY = Math.min(minY, y)
-      maxX = Math.max(maxX, x)
-      maxY = Math.max(maxY, y)
-    })
-    const rangeX = maxX - minX || 1
-    const rangeY = maxY - minY || 1
-    const scale = Math.min(usableW / rangeX, usableH / rangeY)
-
-    withCoords.forEach(({ comp, x, y }) => {
-      positions.set(comp.id, {
-        x: BOARD_PADDING + (x - minX) * scale,
-        y: BOARD_PADDING + (y - minY) * scale,
-      })
-    })
-  }
-
-  withoutCoords.forEach(({ comp }, i) => {
-    positions.set(comp.id, gridPosition(i, withoutCoords.length))
-  })
-
-  return positions
-}
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 function BoardViewContent() {
   const searchParams = useSearchParams()
   const deviceId = searchParams.get('id') || ''
-  const [components, setComponents] = useState<any[]>([])
+  const boardData = useBoardData(deviceId)
+  const { components, loading, hasRealGeometry, ocrFallbackEnabled, boardFileName, parseResult, virtualRegions, pdfNetGraph, pdfComponentGraph, error: boardDataError, loadDevice, importBoardFile, importPdfComponents, clearBoardFile } = boardData
+  const pdfNet = usePdfNetGraph()
   const [voltages, setVoltages] = useState<any[]>([])
-  const [selected, setSelected] = useState<any>(null)
-  const [search, setSearch] = useState('')
-  const [highlighted, setHighlighted] = useState<any>(null)
+  const boardFileInputRef = useRef<HTMLInputElement>(null)
+  const pdfImportInputRef = useRef<HTMLInputElement>(null)
+  const pdfJsonInputRef = useRef<HTMLInputElement>(null)
   const [diagnostic, setDiagnostic] = useState('')
-  const [diagResult, setDiagResult] = useState<DiagnosticResult | null>(null)
-  const [diagLoading, setDiagLoading] = useState(false)
-  const [diagError, setDiagError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [side, setSide] = useState('top')
-  const [zoom, setZoom] = useState(1)
-  const [pan, setPan] = useState({ x: 0, y: 0 })
-  const [isDragging, setIsDragging] = useState(false)
   const [boardImage, setBoardImage] = useState<string | null>(null)
-
-  const viewportRef = useRef<HTMLDivElement>(null)
-  const boardRef = useRef<HTMLDivElement>(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const [overlay, setOverlay] = useState<OverlayState>(DEFAULT_OVERLAY)
+  const [showOverlayPanel, setShowOverlayPanel] = useState(false)
+  const [showVirtualRegions, setShowVirtualRegions] = useState(true)
   const plateInputRef = useRef<HTMLInputElement>(null)
-  const dragRef = useRef({ startX: 0, startY: 0, panX: 0, panY: 0 })
+  const overlaySystem = useRef(new OverlaySystem())
+
+  const ai          = useTechAI()
+  const engine      = useBoardEngine(components)
+  const interaction = useBoardInteraction({ engine, components, deviceId })
+  const extractor   = usePCBExtractor(hasRealGeometry)
+  const pdfImport   = usePCBFromPDF(deviceId)
+  const [pulsePhase, setPulsePhase] = useState(0)
+
+  // Voltages map para lookup rápido
+  const voltagesMap = useMemo(() => {
+    const map = new Map<string, { node: string; value: string }[]>()
+    voltages.forEach(v => {
+      const key = v.component_name
+      if (!map.has(key)) map.set(key, [])
+      map.get(key)!.push({ node: v.node, value: v.value })
+    })
+    return map
+  }, [voltages])
+
+  // Sync overlay system
+  useEffect(() => {
+    return overlaySystem.current.subscribe(setOverlay)
+  }, [])
+
+  const handleToggleOverlay = (key: keyof OverlayState) => {
+    overlaySystem.current.toggle(key)
+  }
 
   useEffect(() => {
     if (!deviceId) return
-    Promise.all([getComponents(deviceId), getVoltages(deviceId)]).then(([comp, volt]) => {
-      const list = comp || []
-      console.log(
-        '[BoardView] Primeiros 5 componentes (coords):',
-        list.slice(0, 5).map((c: any) => ({
-          name: c.name,
-          side: c.side,
-          x_top: c.x_top,
-          y_top: c.y_top,
-          x_bottom: c.x_bottom,
-          y_bottom: c.y_bottom,
-        }))
-      )
-      setComponents(list)
-      setVoltages(volt || [])
-      setLoading(false)
-    })
+    loadDevice()
+    getVoltages(deviceId).then((volt) => setVoltages(volt || []))
+  }, [deviceId, loadDevice])
+
+  const {
+    applyGraph: applyPdfNetGraph,
+    traceSignal: tracePdfSignal,
+    clearNetHighlight: clearPdfNetHighlight,
+    netGraph: activePdfNetGraph,
+  } = pdfNet
+
+  useEffect(() => {
+    applyPdfNetGraph(pdfNetGraph, pdfComponentGraph)
+  }, [pdfNetGraph, pdfComponentGraph, applyPdfNetGraph])
+
+  useEffect(() => {
+    if (!activePdfNetGraph) return
+    if (engine.selected) tracePdfSignal(engine.selected.id)
+    else clearPdfNetHighlight()
+  }, [engine.selected?.id, activePdfNetGraph, tracePdfSignal, clearPdfNetHighlight])
+
+  useEffect(() => {
+    if (!deviceId) return
+    try {
+      const saved = localStorage.getItem(`techboard-plate-${deviceId}-top`)
+      setBoardImage(saved||null)
+    } catch { setBoardImage(null) }
   }, [deviceId])
 
   useEffect(() => {
-    if (!deviceId) {
-      setBoardImage(null)
-      return
+    let id = 0
+    const loop = () => {
+      setPulsePhase(interaction.tickPulse())
+      id = requestAnimationFrame(loop)
     }
-    try {
-      const saved = localStorage.getItem(plateStorageKey(deviceId, side))
-      setBoardImage(saved || null)
-    } catch {
-      setBoardImage(null)
-    }
-  }, [deviceId, side])
+    id = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(id)
+  }, [interaction])
 
-  const handlePlateUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !deviceId) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const dataUrl = reader.result as string
-      setBoardImage(dataUrl)
-      try {
-        localStorage.setItem(plateStorageKey(deviceId, side), dataUrl)
-      } catch (err) {
-        console.warn('[BoardView] Imagem grande demais para localStorage:', err)
-        alert('Imagem salva na sessão, mas pode ser grande demais para persistir no navegador.')
-      }
-    }
-    reader.readAsDataURL(file)
-    e.target.value = ''
-  }
-
-  const handleRemovePlate = () => {
-    if (!deviceId) return
-    setBoardImage(null)
-    try {
-      localStorage.removeItem(plateStorageKey(deviceId, side))
-    } catch {
-      /* ignore */
-    }
-  }
-
-  const boardPositions = useMemo(() => computeBoardPositions(components), [components])
-
-  const visibleOnBoard = useMemo(
-    () =>
-      components.filter(
-        c => search === '' || c.name.toLowerCase().includes(search.toLowerCase())
-      ),
-    [components, search]
-  )
-
-  const resetView = useCallback(() => {
-    const vp = viewportRef.current
-    if (!vp) return
-    setZoom(1)
-    setPan({
-      x: (vp.clientWidth - BOARD_W) / 2,
-      y: (vp.clientHeight - BOARD_H) / 2,
-    })
+  useEffect(() => {
+    const up = () => setIsDragging(false)
+    window.addEventListener('mouseup', up)
+    return () => window.removeEventListener('mouseup', up)
   }, [])
 
-  useEffect(() => {
-    if (!loading) resetView()
-  }, [loading, resetView])
-
-  const centerOnComponent = useCallback(
-    (comp: any, targetZoom?: number) => {
-      const vp = viewportRef.current
-      const pos = boardPositions.get(comp.id)
-      if (!vp || !pos) return
-      const z = targetZoom ?? zoom
-      const cx = pos.x + COMP_W / 2
-      const cy = pos.y + COMP_H / 2
-      if (targetZoom != null) setZoom(targetZoom)
-      setPan({
-        x: vp.clientWidth / 2 - cx * z,
-        y: vp.clientHeight / 2 - cy * z,
-      })
-    },
-    [zoom, boardPositions]
-  )
-
-  useEffect(() => {
-    const vp = viewportRef.current
-    if (!vp) return
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault()
-      const rect = vp.getBoundingClientRect()
-      const mouseX = e.clientX - rect.left
-      const mouseY = e.clientY - rect.top
-      setZoom(prev => {
-        const delta = e.deltaY > 0 ? -0.08 : 0.08
-        const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev + delta))
-        const ratio = next / prev
-        setPan(p => ({
-          x: mouseX - (mouseX - p.x) * ratio,
-          y: mouseY - (mouseY - p.y) * ratio,
-        }))
-        return next
-      })
-    }
-    vp.addEventListener('wheel', onWheel, { passive: false })
-    return () => vp.removeEventListener('wheel', onWheel)
-  }, [loading])
-
-  useEffect(() => {
-    if (!isDragging) return
-    const onMove = (e: MouseEvent) => {
-      const d = dragRef.current
-      setPan({
-        x: d.panX + (e.clientX - d.startX),
-        y: d.panY + (e.clientY - d.startY),
-      })
-    }
-    const onUp = () => setIsDragging(false)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [isDragging])
-
-  const handleBoardMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest('[data-component]')) return
-    dragRef.current = { startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y }
-    setIsDragging(true)
-  }
-
-  const sideComponents = useMemo(
-    () => components.filter(c => c.side === side),
-    [components, side]
-  )
-
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    sideComponents.forEach(c => {
-      const cat = c.category || 'OTHER'
-      counts[cat] = (counts[cat] || 0) + 1
-    })
-    return counts
-  }, [sideComponents])
-
-  const handleSearch = () => {
-    const found = components.find(c => c.name.toLowerCase() === search.toLowerCase())
-    if (found) {
-      setHighlighted(found)
-      setSelected(found)
-      if (found.side) setSide(found.side)
-      const targetZoom = zoom < 0.8 ? 1 : zoom
-      requestAnimationFrame(() => centerOnComponent(found, targetZoom))
-    }
-  }
-
-  const handleDiagnostic = async () => {
+  const handleDiagnose = async () => {
     if (!diagnostic.trim()) return
-    setDiagLoading(true)
-    setDiagResult(null)
-    setDiagError(null)
-    try {
-      const res = await fetch('/api/diagnostic', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symptom: diagnostic,
-          device: DEVICE_LABEL,
-        }),
-      })
-      if (!res.ok) throw new Error('API error')
-      const data: DiagnosticResult = await res.json()
-      setDiagResult(data)
-    } catch {
-      setDiagError('Não foi possível obter o diagnóstico. Verifique a chave GROQ_API_KEY e tente novamente.')
-    } finally {
-      setDiagLoading(false)
-    }
+    await ai.diagnose({
+      userPrompt: diagnostic,
+      troubleshooting: { symptom: diagnostic, deviceModel: deviceId },
+      boardview: engine.selected
+        ? { name: engine.selected.name, category: engine.selected.category, voltage: engine.netVoltage }
+        : undefined,
+    })
   }
 
-  const focusComponent = (name: string) => {
-    const found = components.find(x => x.name === name)
-    if (!found) return
-    setSearch(name)
-    setHighlighted(found)
-    setSelected(found)
-    if (found.side) setSide(found.side)
-    requestAnimationFrame(() => centerOnComponent(found, Math.max(zoom, 1)))
-  }
+  const sideComponents = components.filter(c => c.side === engine.activeLayer)
+  const categoryCounts: Record<string,number> = {}
+  sideComponents.forEach(c => { categoryCounts[c.category] = (categoryCounts[c.category]||0)+1 })
 
-  const compVoltages = voltages.filter(v => selected && v.component_name === selected.name)
-  const selectedPos = selected ? boardPositions.get(selected.id) ?? null : null
-  const selectedColor = selected ? CATEGORY_COLORS[selected.category] || '#64748b' : '#64748b'
+  const displayVirtualRegions = useMemo(
+    () => syncRegionsToComputedPositions(virtualRegions, engine.positions),
+    [virtualRegions, engine.positions]
+  )
 
   return (
-    <div className="min-h-screen bg-[#060c18] text-white font-mono flex flex-col">
-      <div className="border-b border-cyan-500/20 p-4 flex items-center gap-4 flex-wrap">
-        <a href="/" className="text-white/40 hover:text-white text-sm">
-          ← Voltar
+    <div className="min-h-screen bg-[#030608] text-white font-mono flex flex-col">
+      {/* Toolbar */}
+      <div className="border-b border-cyan-500/15 p-3 flex items-center gap-3 flex-wrap bg-[#030608]">
+        <a href="/" className="text-white/40 hover:text-white text-sm font-mono">← Voltar</a>
+        <a href={`/schematics/${deviceId}`} className="px-3 py-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30 hover:bg-yellow-500/20 transition-all">
+          <span className="text-yellow-300 text-xs font-mono">Esquemas Elétricos</span>
         </a>
-        <a href={`/schematics/${deviceId}`} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30 hover:bg-yellow-500/20 transition-all"><span className="text-yellow-300 text-xs font-medium">Esquemas Eletricos</span></a>
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center">
-          ⚡
-        </div>
-        <h1 className="font-bold">
-          TECH<span className="text-cyan-400">BOARD</span> PRO — BoardView
-        </h1>
+        <h1 className="font-bold font-mono text-sm">TECH<span className="text-cyan-400">BOARD</span> PRO</h1>
+        {hasRealGeometry && (
+          <span className="text-[10px] px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 font-mono">
+            REAL BOARD DATA
+          </span>
+        )}
+        {virtualRegions.length > 0 && (
+          <span className="text-[10px] px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 font-mono">
+            VIRTUAL REGIONS ({virtualRegions.length})
+          </span>
+        )}
+        {pdfNetGraph && pdfNetGraph.nets.length > 0 && (
+          <span className="text-[10px] px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 font-mono">
+            NET GRAPH ({pdfNetGraph.nets.length})
+          </span>
+        )}
+        {boardFileName && (
+          <span className="text-[10px] text-cyan-500/60 font-mono truncate max-w-[140px]" title={boardFileName}>
+            {boardFileName}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           <input
-            ref={plateInputRef}
+            ref={boardFileInputRef}
             type="file"
-            accept="image/*"
+            accept=".brd,.fz,.board,.boardview,.boardview.json,.tbv,.json,.xml"
             className="hidden"
-            onChange={handlePlateUpload}
+            onChange={async (e) => {
+              const file = e.target.files?.[0]
+              if (!file) return
+              await importBoardFile(file)
+              e.target.value = ''
+            }}
+          />
+          <button
+            onClick={() => boardFileInputRef.current?.click()}
+            className="px-3 py-1 rounded-lg text-xs border border-cyan-500/40 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 font-mono"
+          >
+            📂 Import BRD/FZ
+          </button>
+          {boardFileName && (
+            <button
+              onClick={clearBoardFile}
+              className="px-2 py-1 rounded-lg text-xs border border-white/10 text-white/40 hover:text-red-400 font-mono"
+              title="Remover arquivo parseado"
+            >
+              ✕
+            </button>
+          )}
+          <input ref={plateInputRef} type="file" accept="image/*" className="hidden" onChange={e => {
+            const file = e.target.files?.[0]; if (!file) return
+            const reader = new FileReader()
+            reader.onload = () => {
+              const url = reader.result as string
+              setBoardImage(url)
+              try { localStorage.setItem(`techboard-plate-${deviceId}-top`, url) } catch {}
+            }
+            reader.readAsDataURL(file); e.target.value=''
+          }}/>
+          <button onClick={() => plateInputRef.current?.click()}
+            className="px-3 py-1 rounded-lg text-xs border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 font-mono">📷 Placa</button>
+          <input
+            ref={pdfImportInputRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0]
+              if (!file) return
+              const result = await pdfImport.extractFromFile(file, { useHybridOcr: true })
+              if (result?.components.length) {
+                importPdfComponents(result.components, {
+                  hits: result.hits,
+                  pageCount: result.pageCount,
+                  netLabels: result.netLabels,
+                })
+              }
+              e.target.value = ''
+            }}
+          />
+          <input
+            ref={pdfJsonInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0]
+              if (!file) return
+              const result = await pdfImport.importFromJson(file)
+              if (result?.components.length) {
+                importPdfComponents(result.components, {
+                  hits: result.hits,
+                  pageCount: result.pageCount,
+                  netLabels: result.netLabels,
+                })
+              }
+              e.target.value = ''
+            }}
           />
           <button
             type="button"
-            onClick={() => plateInputRef.current?.click()}
-            className="px-3 py-1 rounded-lg text-xs border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-all"
+            onClick={() => pdfImportInputRef.current?.click()}
+            disabled={pdfImport.processing || !deviceId}
+            className="px-3 py-1 rounded-lg text-xs border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 font-mono disabled:opacity-50"
+            title={pdfImport.error ?? pdfImport.statusMessage ?? 'PDF.js + OCR híbrido'}
           >
-            📷 Carregar Placa
+            {pdfImport.processing
+              ? `PDF ${pdfImport.progress}%`
+              : '📄 Importar PDF'}
           </button>
-          {boardImage && (
-            <button
-              type="button"
-              onClick={handleRemovePlate}
-              className="px-3 py-1 rounded-lg text-xs border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all"
-            >
-              🗑 Remover imagem
-            </button>
-          )}
-          <span className="text-xs text-white/30 mr-1">{Math.round(zoom * 100)}%</span>
           <button
             type="button"
-            onClick={resetView}
-            className="px-3 py-1 rounded-lg text-xs border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all"
+            onClick={() => pdfJsonInputRef.current?.click()}
+            disabled={pdfImport.processing || !deviceId}
+            className="px-3 py-1 rounded-lg text-xs border border-white/15 bg-white/5 text-white/50 hover:text-white/80 font-mono disabled:opacity-50"
+            title="JSON manual: [{ id, x_top, y_top, width, height }]"
           >
-            ⊙ Centralizar
+            JSON
           </button>
-          {['top', 'bottom', 'sub_top', 'sub_bottom'].map(s => (
+          {pdfImport.processing && pdfImport.statusMessage && (
+            <span className="text-[10px] text-amber-400/80 font-mono max-w-[200px] truncate">
+              {pdfImport.statusMessage}
+            </span>
+          )}
+          {pdfImport.error && (
+            <span className="text-xs text-red-400 font-mono max-w-xs truncate" title={pdfImport.error}>
+              {pdfImport.error}
+            </span>
+          )}
+          {extractor.isElectron && extractor.ocrEnabled && (
             <button
-              key={s}
-              type="button"
-              onClick={() => setSide(s)}
-              className={`px-3 py-1 rounded-lg text-xs border transition-all ${
-                side === s
-                  ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400'
-                  : 'border-white/10 text-white/40 hover:border-white/30'
-              }`}
+              onClick={async () => {
+                if (!deviceId) return
+                let pdfPath: string | null = null
+                if (window.electronAPI?.selectPdf) {
+                  pdfPath = await window.electronAPI.selectPdf()
+                } else {
+                  pdfPath = await new Promise<string | null>((resolve) => {
+                    const input = document.createElement('input')
+                    input.type = 'file'
+                    input.accept = '.pdf'
+                    input.onchange = () => {
+                      const file = input.files?.[0]
+                      resolve((file as File & { path?: string })?.path ?? null)
+                    }
+                    input.click()
+                  })
+                }
+                if (!pdfPath) return
+                const data = await extractor.extractFromPDF(pdfPath, deviceId)
+                if (data) await loadDevice()
+              }}
+              disabled={extractor.processing || !deviceId}
+              className="px-3 py-1 rounded-lg text-xs border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 font-mono disabled:opacity-50"
+              title={extractor.error ?? undefined}
             >
-              {s.replace('_', ' ').toUpperCase()}
+              {extractor.processing
+                ? `OCR ${extractor.progress}%`
+                : '🔬 Extrair PDF'}
+            </button>
+          )}
+          {extractor.isElectron && !extractor.ocrEnabled && (
+            <span className="text-[10px] text-emerald-500/70 font-mono" title="Geometria real carregada">
+              OCR off
+            </span>
+          )}
+          {extractor.error && extractor.isElectron && extractor.ocrEnabled && (
+            <span className="text-xs text-red-400 font-mono max-w-xs truncate" title={extractor.error}>
+              {extractor.error}
+            </span>
+          )}
+          {boardImage && <button onClick={() => { setBoardImage(null); try{localStorage.removeItem(`techboard-plate-${deviceId}-top`)}catch{} }}
+            className="px-3 py-1 rounded-lg text-xs border border-red-500/30 bg-red-500/10 text-red-400 font-mono">🗑</button>}
+          <span className="text-xs text-white/30 font-mono">{Math.round(engine.viewport.zoom*100)}%</span>
+          <button onClick={engine.resetView}
+            className="px-3 py-1 rounded-lg text-xs border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 font-mono">⊙ Reset</button>
+          {/* Overlay toggle */}
+          <button onClick={() => setShowOverlayPanel(v => !v)}
+            className={`px-3 py-1 rounded-lg text-xs border transition-all font-mono ${showOverlayPanel ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400' : 'border-white/10 text-white/40 hover:border-white/30'}`}>
+            ⊞ Layers
+          </button>
+          {(['top','bottom','sub_top','sub_bottom'] as const).map(s => (
+            <button key={s} onClick={() => engine.setActiveLayer(s)}
+              className={`px-2 py-1 rounded-lg text-xs border transition-all font-mono ${engine.activeLayer===s?'border-cyan-500 bg-cyan-500/20 text-cyan-400':'border-white/10 text-white/40 hover:border-white/30'}`}>
+              {s.replace('_',' ').toUpperCase()}
             </button>
           ))}
         </div>
       </div>
 
+      {boardDataError && (
+        <div className="px-4 py-2 text-xs text-red-400 bg-red-500/10 border-b border-red-500/20 font-mono">
+          {boardDataError}
+        </div>
+      )}
+      {parseResult && !parseResult.success && (
+        <div className="px-4 py-2 text-xs text-amber-400 bg-amber-500/10 border-b border-amber-500/20 font-mono">
+          Parse: {parseResult.errors.join(' · ')}
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
-        <div className="w-72 border-r border-white/10 flex flex-col gap-4 p-4 overflow-y-auto shrink-0">
-          <div>
-            <div className="text-xs text-white/40 mb-2 tracking-widest">🔍 BUSCAR COMPONENTE</div>
-            <div className="flex gap-2">
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSearch()}
-                placeholder="Ex: U5003, PMIC..."
-                className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-cyan-500/50"
-              />
-              <button
-                type="button"
-                onClick={handleSearch}
-                className="px-3 py-2 bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-cyan-400 text-sm hover:bg-cyan-500/30 transition-all"
-              >
-                →
-              </button>
-            </div>
-          </div>
+        <BoardSidebar
+          searchBar={
+            <ComponentSearchBar
+              searchQuery={interaction.searchQuery}
+              setSearchQuery={interaction.setSearchQuery}
+              matches={interaction.searchMatches}
+              recentSearches={interaction.recentSearches}
+              onSubmit={interaction.submitSearch}
+              onSelect={(name) => interaction.focusComponent(name, { fromSearch: true })}
+              onSearchChange={interaction.setSearchQuery}
+            />
+          }
+          diagnostic={diagnostic} setDiagnostic={setDiagnostic} onDiagnose={handleDiagnose}
+          diagLoading={ai.loading} diagResult={ai.response} diagError={ai.error}
+          sideComponents={sideComponents} categoryCounts={categoryCounts}
+        />
 
-          <div>
-            <div className="text-xs text-white/40 mb-2 tracking-widest">🤖 IA DIAGNÓSTICO</div>
-            <div className="flex flex-col gap-2">
-              <input
-                value={diagnostic}
-                onChange={e => setDiagnostic(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleDiagnostic()}
-                placeholder="Ex: sem rede, não liga..."
-                className="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-purple-500/50"
-              />
-              <button
-                type="button"
-                onClick={handleDiagnostic}
-                disabled={diagLoading}
-                className="px-3 py-2 bg-purple-500/20 border border-purple-500/30 rounded-lg text-purple-400 text-sm hover:bg-purple-500/30 transition-all disabled:opacity-50"
-              >
-                {diagLoading ? 'Analisando...' : 'Diagnosticar'}
-              </button>
-            </div>
-            {diagError && (
-              <div className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                {diagError}
-              </div>
-            )}
-            {diagResult && (
-              <div className="mt-3 space-y-3 bg-white/3 border border-white/10 rounded-lg p-3">
-                <div>
-                  <div className="text-[10px] text-white/40 mb-1 tracking-wider">DIAGNÓSTICO</div>
-                  <div className="text-xs text-white/80 leading-relaxed">{diagResult.diagnostico}</div>
-                </div>
-                {diagResult.componentes?.length > 0 && (
-                  <div className="mt-3">
-                    <div className="text-[10px] text-white/40 mb-2 tracking-wider">COMPONENTES</div>
-                    <div className="flex flex-wrap gap-1">
-                      {diagResult.componentes.map((c, k) => (
-                        <button key={k} type="button" onClick={() => focusComponent(c)} className="px-2 py-0.5 bg-cyan-500/10 border border-cyan-500/20 rounded text-cyan-400 text-xs cursor-pointer hover:bg-cyan-500/20">{c}</button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {diagResult.tensoes?.length > 0 && (
-                  <div>
-                    <div className="text-[10px] text-white/40 mb-2 tracking-wider">TENSÕES</div>
-                    <div className="rounded border border-white/10 overflow-hidden">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="bg-white/5 text-white/40">
-                            <th className="text-left px-2 py-1 font-normal">Ponto</th>
-                            <th className="text-right px-2 py-1 font-normal">Valor</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {diagResult.tensoes.map((t, i) => (
-                            <tr key={i} className="border-t border-white/5">
-                              <td className="px-2 py-1 text-white/70">{t.ponto}</td>
-                              <td className="px-2 py-1 text-cyan-400 text-right font-bold">{t.valor}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {diagResult.procedimento?.length > 0 && (
-                  <div>
-                    <div className="text-[10px] text-white/40 mb-2 tracking-wider">PROCEDIMENTO</div>
-                    <ol className="space-y-1.5 list-none">
-                      {diagResult.procedimento.map((passo, i) => (
-                        <li key={i} className="flex gap-2 text-xs text-white/70">
-                          <span className="w-5 h-5 rounded bg-purple-500/20 text-purple-400 text-[10px] flex items-center justify-center shrink-0 font-bold">
-                            {i + 1}
-                          </span>
-                          <span className="leading-relaxed">{passo}</span>
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                )}
-
-                {diagResult.solucao_comum && (
-                  <div className="rounded-lg p-3 bg-green-500/10 border border-green-500/30">
-                    <div className="text-[10px] text-green-400/80 mb-1 tracking-wider font-bold">
-                      SOLUÇÃO COMUM
-                    </div>
-                    <div className="text-xs text-green-300 leading-relaxed">{diagResult.solucao_comum}</div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div>
-            <div className="text-xs text-white/40 mb-2 tracking-widest">
-              🎨 CATEGORIAS ({sideComponents.length})
-            </div>
-            <div className="space-y-1">
-              {Object.entries(CATEGORY_COLORS)
-                .filter(([cat]) => (categoryCounts[cat] ?? 0) > 0)
-                .map(([cat, color]) => (
-                  <div key={cat} className="flex items-center justify-between gap-2 text-xs">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="w-3 h-3 rounded-full shrink-0" style={{ background: color }} />
-                      <span className="text-white/60 truncate">{cat}</span>
-                    </div>
-                    <span
-                      className="px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0"
-                      style={{ background: `${color}22`, color }}
-                    >
-                      {categoryCounts[cat]}
-                    </span>
-                  </div>
-                ))}
-              {sideComponents.length === 0 && (
-                <div className="text-xs text-white/30">Nenhum componente neste lado</div>
-              )}
-            </div>
-          </div>
-
-          <div className="text-[10px] text-white/25 leading-relaxed border-t border-white/5 pt-3">
-            Scroll: zoom · Arrastar: mover · Duplo clique no fundo: centralizar
-          </div>
-        </div>
-
-        <div
-          ref={viewportRef}
-          className={`flex-1 relative overflow-hidden select-none ${
-            isDragging ? 'cursor-grabbing' : 'cursor-grab'
-          }`}
-          onMouseDown={handleBoardMouseDown}
-          onDoubleClick={resetView}
-        >
-          {loading ? (
-            <div className="flex items-center justify-center h-full gap-3 text-white/40 bg-[#060e1a]">
-              <div className="w-6 h-6 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin" />
-              Carregando componentes...
-            </div>
-          ) : (
-            <div
-              className="absolute origin-top-left will-change-transform"
+        <div className="flex-1 relative overflow-hidden">
+          <BoardViewer
+            components={components}
+            positions={engine.positions}
+            highlights={engine.highlights}
+            selected={engine.selected}
+            hovered={interaction.hovered}
+            connectedIds={engine.connectedIds}
+            netColor={engine.netColor}
+            netName={engine.netName}
+            netVoltage={engine.netVoltage}
+            activeLayer={engine.activeLayer}
+            viewport={engine.viewport}
+            boardImage={boardImage}
+            loading={loading}
+            overlay={overlay}
+            voltagesMap={voltagesMap}
+            viewportRef={engine.viewportRef as any}
+            onMouseDown={(e) => { setIsDragging(true); engine.onMouseDown(e) }}
+            onCanvasClick={interaction.handleCanvasClick}
+            onPointerMove={interaction.handlePointerMove}
+            onPointerLeave={interaction.handlePointerLeave}
+            onDoubleClick={engine.resetView}
+            isDragging={isDragging}
+            searchFocusId={interaction.searchFocusId}
+            errorComponentId={interaction.errorComponentId}
+            pulsePhase={pulsePhase}
+          />
+          <RegionOverlayLayer
+            regions={displayVirtualRegions}
+            viewport={engine.viewport}
+            visible={showVirtualRegions && displayVirtualRegions.length > 0}
+          />
+          <NetGraphOverlayLayer
+            highlightedComponentIds={pdfNet.highlightedComponentIds}
+            positions={engine.positions}
+            viewport={engine.viewport}
+            visible={
+              !!pdfNet.netGraph && pdfNet.highlightedComponentIds.length > 0
+            }
+            color={pdfNet.activeNet?.color ?? '#00d4ff'}
+          />
+          {pdfNet.netGraph && (
+            <PdfNetsPanel
+              nets={pdfNet.netGraph.nets}
+              activeNetId={pdfNet.highlightedNetId}
+              onHighlight={pdfNet.highlightNet}
+              onClear={pdfNet.clearNetHighlight}
+            />
+          )}
+          <ComponentTooltip tooltip={interaction.tooltip} containerRef={engine.viewportRef} />
+          {virtualRegions.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowVirtualRegions((v) => !v)}
+              className="absolute top-3 left-3 z-10 px-2 py-1 rounded-lg text-[10px] border font-mono transition-all"
               style={{
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                width: BOARD_W,
-                height: BOARD_H,
+                borderColor: showVirtualRegions ? 'rgba(245,158,11,0.5)' : 'rgba(255,255,255,0.15)',
+                background: showVirtualRegions ? 'rgba(245,158,11,0.12)' : 'rgba(3,6,12,0.85)',
+                color: showVirtualRegions ? '#fbbf24' : 'rgba(255,255,255,0.4)',
               }}
+              title="Regiões virtuais do schematic PDF"
             >
-              <div
-                ref={boardRef}
-                className="relative rounded-sm overflow-hidden shadow-2xl shadow-black/50"
-                style={{
-                  width: BOARD_W,
-                  height: BOARD_H,
-                  background: boardImage
-                    ? '#0a1a10'
-                    : `linear-gradient(145deg, #0a2216 0%, #0d3320 35%, #0a2818 70%, #071f12 100%)`,
-                }}
-              >
-                {boardImage && (
-                  <img
-                    src={boardImage}
-                    alt={`Placa ${plateStorageSide(side)}`}
-                    width={BOARD_W}
-                    height={BOARD_H}
-                    draggable={false}
-                    className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
-                  />
-                )}
-                {/* Trilhas PCB */}
-                <div
-                  className={`absolute inset-0 pointer-events-none ${boardImage ? 'opacity-20' : ''}`}
-                  style={{
-                    backgroundImage: `
-                      linear-gradient(90deg, rgba(52, 211, 153, 0.12) 1px, transparent 1px),
-                      linear-gradient(rgba(52, 211, 153, 0.12) 1px, transparent 1px),
-                      linear-gradient(90deg, rgba(16, 185, 129, 0.06) 1px, transparent 1px),
-                      linear-gradient(rgba(16, 185, 129, 0.06) 1px, transparent 1px)
-                    `,
-                    backgroundSize: '80px 80px, 80px 80px, 20px 20px, 20px 20px',
-                  }}
-                />
-                <div
-                  className={`absolute inset-0 pointer-events-none ${boardImage ? 'opacity-15' : 'opacity-40'}`}
-                  style={{
-                    backgroundImage: `
-                      repeating-linear-gradient(
-                        0deg,
-                        transparent,
-                        transparent 38px,
-                        rgba(34, 197, 94, 0.15) 38px,
-                        rgba(34, 197, 94, 0.15) 40px
-                      ),
-                      repeating-linear-gradient(
-                        90deg,
-                        transparent,
-                        transparent 58px,
-                        rgba(34, 197, 94, 0.1) 58px,
-                        rgba(34, 197, 94, 0.1) 60px
-                      )
-                    `,
-                  }}
-                />
-                <div
-                  className="absolute inset-4 rounded border border-emerald-900/60 pointer-events-none"
-                  style={{ boxShadow: 'inset 0 0 60px rgba(0,0,0,0.4)' }}
-                />
-
-                {visibleOnBoard.map(comp => {
-                  const pos = boardPositions.get(comp.id)
-                  if (!pos) return null
-                  const color = CATEGORY_COLORS[comp.category] || '#64748b'
-                  const isHighlighted = highlighted?.id === comp.id
-                  const isSelected = selected?.id === comp.id
-                  const isActiveSide = comp.side === side
-                  const category = comp.category || 'OTHER'
-                  return (
-                    <div
-                      key={comp.id}
-                      data-component
-                      role="button"
-                      tabIndex={0}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => {
-                        setSelected(comp)
-                        setHighlighted(comp)
-                        if (comp.side) setSide(comp.side)
-                      }}
-                      style={{
-                        position: 'absolute',
-                        left: pos.x,
-                        top: pos.y,
-                        width: COMP_W,
-                        height: COMP_H,
-                        opacity: isActiveSide ? 1 : 0.35,
-                        borderColor: isHighlighted || isSelected ? color : `${color}66`,
-                        background: isSelected
-                          ? hexToRgba(color, COMP_BG_ALPHA + 0.15)
-                          : hexToRgba(color, COMP_BG_ALPHA),
-                        boxShadow: isHighlighted
-                          ? undefined
-                          : isSelected
-                            ? `0 0 12px ${color}66`
-                            : 'none',
-                        ['--neon-color' as string]: color,
-                      }}
-                      className={`rounded border-2 flex flex-col items-center justify-center cursor-pointer transition-all text-xs font-bold
-                        ${isSelected ? 'z-10 ring-1 ring-white/30' : isActiveSide ? 'hover:brightness-125 z-0' : 'z-0 hover:opacity-60'}
-                        ${isHighlighted ? 'z-20 neon-highlight !opacity-100' : ''}`}
-                    >
-                      <span
-                        style={{ color, fontSize: 10 }}
-                        className="truncate px-1 max-w-full leading-tight font-bold"
-                      >
-                        {comp.name}
-                      </span>
-                      <span
-                        style={{ color, fontSize: 8 }}
-                        className="truncate px-1 max-w-full opacity-75 leading-tight"
-                      >
-                        {category}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
+              {showVirtualRegions ? '◧ Regiões ON' : '◨ Regiões OFF'}
+            </button>
+          )}
+          {showOverlayPanel && (
+            <OverlayPanel overlay={overlay} onToggle={handleToggleOverlay}/>
           )}
         </div>
 
-        <div className="w-80 border-l border-white/10 p-4 overflow-y-auto shrink-0">
-          {!selected ? (
-            <div className="text-center text-white/20 mt-20">
-              <div className="text-4xl mb-4">📍</div>
-              <div className="text-sm">Clique em um componente para ver detalhes</div>
-              <div className="text-xs text-white/15 mt-4 px-4">
-                {visibleOnBoard.length} no board · {sideComponents.length} no lado {side.replace('_', ' ')}
-              </div>
-            </div>
-          ) : (
-            <div>
-              <div
-                className="rounded-xl p-4 mb-4 border"
-                style={{
-                  background: `linear-gradient(135deg, ${selectedColor}15, transparent)`,
-                  borderColor: `${selectedColor}44`,
-                  boxShadow: `0 0 24px ${selectedColor}22`,
-                }}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-12 h-12 rounded-xl flex items-center justify-center text-xl font-bold shrink-0"
-                    style={{
-                      background: `${selectedColor}22`,
-                      border: `2px solid ${selectedColor}`,
-                      color: selectedColor,
-                    }}
-                  >
-                    {selected.name.charAt(0)}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-bold text-lg truncate" style={{ color: selectedColor }}>
-                      {selected.name}
-                    </div>
-                    <div
-                      className="text-xs font-semibold mt-0.5 px-2 py-0.5 rounded inline-block"
-                      style={{ background: `${selectedColor}22`, color: selectedColor }}
-                    >
-                      {selected.category}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2 text-sm">
-                <DetailRow label="ID" value={selected.id} mono />
-                {selectedPos && (
-                  <DetailRow label="COORDENADAS" value={`X: ${selectedPos.x} · Y: ${selectedPos.y}`} mono />
-                )}
-                {selected.side && <DetailRow label="LADO" value={selected.side.replace('_', ' ').toUpperCase()} />}
-                {selected.part_code && (
-                  <DetailRow label="PART CODE" value={selected.part_code} accent={selectedColor} />
-                )}
-                <DetailRow
-                  label="DESCRIÇÃO"
-                  value={selected.description || 'Sem descrição cadastrada'}
-                  multiline
-                />
-                {selected.package && <DetailRow label="PACKAGE" value={selected.package} />}
-                {selected.rotation != null && <DetailRow label="ROTAÇÃO" value={`${selected.rotation}°`} />}
-                <DetailRow
-                  label="NA CATEGORIA"
-                  value={`${categoryCounts[selected.category] || 0} componente(s) ${selected.category} neste lado`}
-                />
-                {compVoltages.length > 0 && (
-                  <div className="bg-white/3 rounded-lg p-3 mt-2">
-                    <div className="text-xs text-white/40 mb-2">⚡ TENSÕES ({compVoltages.length})</div>
-                    <div className="space-y-1.5">
-                      {compVoltages.map((v, i) => (
-                        <div
-                          key={i}
-                          className="flex justify-between text-xs py-1 border-b border-white/5 last:border-0"
-                        >
-                          <span className="text-white/60">{v.node}</span>
-                          <span className="text-cyan-400 font-bold">{v.value}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => centerOnComponent(selected)}
-                  className="w-full mt-3 py-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 text-xs hover:bg-cyan-500/20 transition-all"
-                >
-                  🎯 Focar no board
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <style jsx global>{`
-        @keyframes neonPulse {
-          0%,
-          100% {
-            box-shadow:
-              0 0 6px var(--neon-color),
-              0 0 14px var(--neon-color),
-              0 0 28px color-mix(in srgb, var(--neon-color) 60%, transparent);
-            transform: scale(1.08);
-          }
-          50% {
-            box-shadow:
-              0 0 12px var(--neon-color),
-              0 0 28px var(--neon-color),
-              0 0 48px color-mix(in srgb, var(--neon-color) 80%, transparent),
-              0 0 64px color-mix(in srgb, var(--neon-color) 40%, transparent);
-            transform: scale(1.14);
-          }
-        }
-        .neon-highlight {
-          animation: neonPulse 1.2s ease-in-out infinite;
-          z-index: 20;
-        }
-      `}</style>
-    </div>
-  )
-}
-
-function DetailRow({
-  label,
-  value,
-  mono,
-  accent,
-  multiline,
-}: {
-  label: string
-  value: string
-  mono?: boolean
-  accent?: string
-  multiline?: boolean
-}) {
-  return (
-    <div className="bg-white/3 rounded-lg p-3">
-      <div className="text-[10px] text-white/40 mb-1 tracking-wider">{label}</div>
-      <div
-        className={`text-sm ${mono ? 'font-mono text-cyan-300/90' : ''} ${multiline ? 'leading-relaxed' : 'truncate'}`}
-        style={accent ? { color: accent } : undefined}
-      >
-        {value}
+        <ComponentInspectorPanel
+          selected={engine.selected}
+          metadata={interaction.selectedMetadata}
+          voltages={voltages}
+          onCenter={() => engine.selected && engine.centerOnComponent(engine.selected)}
+          netName={engine.netName}
+          netVoltage={engine.netVoltage}
+          netColor={engine.netColor}
+          connectedIds={engine.connectedIds}
+          components={components}
+          onFocusComponent={(name) => interaction.focusComponent(name, { fromSearch: true })}
+          deviceId={deviceId}
+        />
       </div>
     </div>
   )
@@ -874,14 +612,8 @@ function DetailRow({
 
 export default function BoardViewPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen bg-[#060c18] flex items-center justify-center text-white/40">
-          Carregando...
-        </div>
-      }
-    >
-      <BoardViewContent />
+    <Suspense fallback={<div className="min-h-screen bg-[#030608] flex items-center justify-center text-white/40 font-mono">Carregando...</div>}>
+      <BoardViewContent/>
     </Suspense>
   )
 }

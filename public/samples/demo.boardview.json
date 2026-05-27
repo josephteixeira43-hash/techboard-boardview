@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "board": { "width": 10000, "height": 10000 },
+  "components": [
+    { "id": "U3200", "x": 420, "y": 280, "width": 80, "height": 48, "net": "PP_VDD_MAIN", "layer": "top", "type": "PMIC" },
+    { "id": "C5201", "x": 520, "y": 310, "width": 24, "height": 16, "net": "PP_VDD_MAIN", "layer": "top", "type": "CAPACITOR" },
+    { "id": "R2201", "x": 380, "y": 340, "width": 32, "height": 12, "net": "GND", "layer": "top", "type": "RESISTOR" },
+    { "id": "FL1100", "x": 600, "y": 260, "width": 36, "height": 36, "net": "RF_ANT", "layer": "top", "type": "RF" },
+    { "id": "J7000", "x": 200, "y": 400, "width": 64, "height": 28, "net": "VBUS", "layer": "top", "type": "CONNECTOR" }
+  ]
+}

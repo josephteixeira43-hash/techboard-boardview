@@ -1,0 +1,29 @@
+[
+  {
+    "id": "U3200",
+    "x_top": 420,
+    "y_top": 310,
+    "width": 80,
+    "height": 48,
+    "side": "top",
+    "type": "PMIC"
+  },
+  {
+    "id": "C105",
+    "x_top": 520,
+    "y_top": 400,
+    "width": 36,
+    "height": 20,
+    "side": "top",
+    "type": "CAPACITOR"
+  },
+  {
+    "id": "R12",
+    "x_top": 600,
+    "y_top": 380,
+    "width": 30,
+    "height": 15,
+    "side": "top",
+    "type": "RESISTOR"
+  }
+]

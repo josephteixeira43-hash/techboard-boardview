@@ -1,5 +1,6 @@
 "use client";
 import { useRef, useState, useCallback } from "react";
+import { preprocessCanvasForOCR } from "@/lib/ocrPreprocessor";
 
 export interface OCRResult {
   text: string;
@@ -18,7 +19,6 @@ export interface OCRHighlight {
   isCurrent: boolean;
 }
 
-// Cache de resultados OCR por página
 const ocrCache = new Map<string, OCRResult[]>();
 
 export function useOCREngine() {
@@ -29,7 +29,6 @@ export function useOCREngine() {
   const [currentMatch, setCurrentMatch] = useState(0);
   const workerRef = useRef<any>(null);
 
-  // Inicializa worker Tesseract
   async function getWorker() {
     if (workerRef.current) return workerRef.current;
     const { createWorker } = await import("tesseract.js");
@@ -40,47 +39,119 @@ export function useOCREngine() {
         }
       },
     });
+    await worker.setParameters({
+      tessedit_pageseg_mode: "1",
+    });
     workerRef.current = worker;
     return worker;
   }
 
-  // Processa OCR em uma página do canvas
   const processPage = useCallback(async (
     canvas: HTMLCanvasElement,
     pageIndex: number,
     cacheKey: string
   ): Promise<OCRResult[]> => {
-    // Verifica cache
     const cached = ocrCache.get(`${cacheKey}-${pageIndex}`);
     if (cached) return cached;
 
     const worker = await getWorker();
 
-    // Converte canvas para blob
-    const blob = await new Promise<Blob>((resolve) => {
-      canvas.toBlob((b) => resolve(b!), "image/png");
+    // Inverte pixel a pixel: fundo preto → branco para OCR funcionar
+    const invertedCanvas = document.createElement("canvas");
+    invertedCanvas.width = canvas.width;
+    invertedCanvas.height = canvas.height;
+    const invertCtx = invertedCanvas.getContext("2d", { willReadFrequently: true })!;
+    invertCtx.drawImage(canvas, 0, 0);
+    const imgData = invertCtx.getImageData(0, 0, invertedCanvas.width, invertedCanvas.height);
+    for (let i = 0; i < imgData.data.length; i += 4) {
+      imgData.data[i]     = 255 - imgData.data[i];
+      imgData.data[i + 1] = 255 - imgData.data[i + 1];
+      imgData.data[i + 2] = 255 - imgData.data[i + 2];
+    }
+    invertCtx.putImageData(imgData, 0, 0);
+
+    const cleanCanvas = await preprocessCanvasForOCR(invertedCanvas, {
+      removeHighlights: true,
+      binarize: true,
+      binarizeThreshold: 160,
+      enhanceContrast: true,
+      contrastFactor: 2.5,
+      upscale: 4,
     });
 
-    const { data } = await worker.recognize(blob);
+    const blob = await new Promise<Blob>((resolve) => {
+      cleanCanvas.toBlob((b) => resolve(b!), "image/png");
+    });
+
+    const { data } = await worker.recognize(blob, {}, {
+      text: true,
+      blocks: true,
+      hocr: false,
+      tsv: false,
+      box: false,
+    });
 
     const results: OCRResult[] = [];
-    data.words.forEach((word: any) => {
-      if (word.confidence > 40 && word.text.trim().length > 1) {
-        results.push({
-          text: word.text.trim(),
-          bbox: word.bbox,
-          confidence: word.confidence,
-          pageIndex,
+    const upscale = 4;
+    const canvasW = cleanCanvas.width / upscale;
+    const canvasH = cleanCanvas.height / upscale;
+
+    const words =
+      data.words ??
+      data.lines?.flatMap((l: any) => l.words ?? []) ??
+      data.blocks?.flatMap((b: any) =>
+        b.paragraphs?.flatMap((p: any) =>
+          p.lines?.flatMap((l: any) => l.words ?? []) ?? []
+        ) ?? []
+      ) ?? [];
+
+    if (words.length > 0) {
+      words.forEach((word: any) => {
+        if (word.confidence > 40 && word.text?.trim().length > 1) {
+          results.push({
+            text: word.text.trim(),
+            bbox: {
+              x0: word.bbox.x0 / upscale,
+              y0: word.bbox.y0 / upscale,
+              x1: word.bbox.x1 / upscale,
+              y1: word.bbox.y1 / upscale,
+            },
+            confidence: word.confidence,
+            pageIndex,
+          });
+        }
+      });
+    } else if (data.text) {
+      const lines = data.text.split("\n").filter((l: string) => l.trim().length > 1);
+      const lineH = canvasH / Math.max(lines.length, 1);
+
+      lines.forEach((line: string, lineIdx: number) => {
+        const tokens = line.trim().split(/\s+/);
+        const tokenW = canvasW / Math.max(tokens.length, 1);
+
+        tokens.forEach((token: string, tokenIdx: number) => {
+          if (token.length > 1) {
+            results.push({
+              text: token,
+              bbox: {
+                x0: tokenIdx * tokenW,
+                y0: lineIdx * lineH,
+                x1: (tokenIdx + 1) * tokenW,
+                y1: (lineIdx + 1) * lineH,
+              },
+              confidence: 80,
+              pageIndex,
+            });
+          }
         });
-      }
-    });
-console.log("OCR words found:", results.slice(0, 20).map(r => r.text));
+      });
+    }
+
+    console.log("OCR words found:", results.map(r => r.text).join(", "));
     ocrCache.set(`${cacheKey}-${pageIndex}`, results);
     return results;
   }, []);
-  
 
-  // Busca no OCR
   const searchOCR = useCallback((
     query: string,
     results: OCRResult[],
@@ -97,7 +168,7 @@ console.log("OCR words found:", results.slice(0, 20).map(r => r.text));
     const q = query.toLowerCase();
     const matches: OCRHighlight[] = [];
 
-    results.forEach((r, i) => {
+    results.forEach((r) => {
       if (r.text.toLowerCase().includes(q) && r.pageIndex === currentPage) {
         matches.push({
           x: r.bbox.x0,
@@ -111,7 +182,6 @@ console.log("OCR words found:", results.slice(0, 20).map(r => r.text));
       }
     });
 
-    // Marca o atual
     if (matches.length > 0) {
       matches[currentMatch % matches.length].isCurrent = true;
     }
@@ -120,7 +190,6 @@ console.log("OCR words found:", results.slice(0, 20).map(r => r.text));
     return matches;
   }, [currentMatch]);
 
-  // Processa OCR da página atual
   const runOCR = useCallback(async (
     canvas: HTMLCanvasElement,
     pageIndex: number,
@@ -132,7 +201,6 @@ console.log("OCR words found:", results.slice(0, 20).map(r => r.text));
     try {
       const results = await processPage(canvas, pageIndex, fileUrl);
       setOcrResults(prev => {
-        // Remove resultados anteriores dessa página
         const filtered = prev.filter(r => r.pageIndex !== pageIndex);
         return [...filtered, ...results];
       });

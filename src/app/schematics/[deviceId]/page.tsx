@@ -14,7 +14,7 @@ import PDFCanvas from "@/components/pdf/PDFCanvas.v2";
 import SearchBar from "@/components/search/SearchBar";
 import ComponentSidebar, { SchematicFile } from "@/components/ui/ComponentSidebar";
 
-const MiniMap = dynamic(() => import("@/components/minimap/MiniMap"), { ssr: false });
+const MiniMap = dynamic(() => import("@/components/boardview/MiniMap"), { ssr: false });
 const DiagnosticAI = dynamic(() => import("@/components/diagnostic/DiagnosticAI"), { ssr: false });
 
 const supabase = createClient(
@@ -56,17 +56,23 @@ export default function SchematicsProPage() {
     clearHighlights,
   } = useOCREngine();
 
-  useEffect(() => { fetchDeviceAndFiles(); }, [deviceId]);
+useEffect(() => { fetchDeviceAndFiles(); }, [deviceId]);
 
-  // Roda OCR automaticamente após página renderizar
-  useEffect(() => {
-    if (!canvasRef.current || loading || !selectedFile) return;
-    const timer = setTimeout(async () => {
-      await runOCR(canvasRef.current!, currentPage, selectedFile.url);
-      setOcrReady(true);
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [currentPage, loading, selectedFile]);
+// Limpa OCR ao trocar de arquivo
+useEffect(() => {
+  setOcrReady(false);
+  clearHighlights();
+}, [selectedFile]);
+
+// Roda OCR automaticamente após página renderizar
+useEffect(() => {
+  if (!canvasRef.current || loading || !selectedFile) return;
+  const timer = setTimeout(async () => {
+    await runOCR(canvasRef.current!, currentPage, selectedFile.url);
+    setOcrReady(true);
+  }, 2000);
+  return () => clearTimeout(timer);
+}, [currentPage, loading, selectedFile]);
 
   async function fetchDeviceAndFiles() {
     setFilesLoading(true);

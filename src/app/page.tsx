@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getDevices } from '@/lib/queries'
@@ -35,11 +35,8 @@ export default function Home() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {devices.map(device => (
-              <div
-                key={device.id}
-                onClick={() => router.push(`/boardview?id=${device.id}`)}
-                className="bg-white/2 border border-white/10 rounded-2xl p-6 cursor-pointer hover:border-cyan-500/40 hover:bg-cyan-500/5 transition-all group"
-              >
+              <div key={device.id} onClick={() => router.push(`/boardview?id=${device.id}`)}
+                className="bg-white/2 border border-white/10 rounded-2xl p-6 cursor-pointer hover:border-cyan-500/40 hover:bg-cyan-500/5 transition-all group">
                 <div className="flex items-center gap-3 mb-4">
                   <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-lg">📱</div>
                   <div>
