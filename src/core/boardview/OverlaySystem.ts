@@ -158,7 +158,7 @@ export interface OverlayRenderError {
  * Public interface of the object returned by createOverlaySystem().
  * All mutation methods are synchronous and immediately consistent.
  */
-export interface OverlaySystem {
+export interface OverlaySystemAPI {
   /**
    * Register an overlay.
    *
@@ -278,7 +278,7 @@ function compareEntries(a: OverlayEntry, b: OverlayEntry): number {
  *
  * @returns A fully initialised OverlaySystem.
  */
-export function createOverlaySystem(): OverlaySystem {
+export function createOverlaySystem(): OverlaySystemAPI {
 
   // ── Closure State ──────────────────────────────────────────────────────────
   //
@@ -417,7 +417,7 @@ export function createOverlaySystem(): OverlaySystem {
   // Use a getter for lastRenderErrors and size so they reflect current state
   // when accessed, without requiring the caller to call a method.
 
-  const system: OverlaySystem = {
+  const system: OverlaySystemAPI = {
     registerOverlay,
     unregisterOverlay,
     setOverlayVisible,
@@ -435,4 +435,52 @@ export function createOverlaySystem(): OverlaySystem {
   };
 
   return Object.freeze(system);
+}
+
+export type OverlayState = {
+  showPads: boolean;
+  showVias: boolean;
+  showTraces: boolean;
+  showNets: boolean;
+  showLabels: boolean;
+  showSilkscreen: boolean;
+  showVoltages: boolean;
+  showGrid: boolean;
+};
+
+export const DEFAULT_OVERLAY: OverlayState = Object.freeze({
+  showPads: true,
+  showVias: true,
+  showTraces: true,
+  showNets: true,
+  showLabels: true,
+  showSilkscreen: true,
+  showVoltages: true,
+  showGrid: false,
+});
+
+// Backward-compatible class export used by page-level imports.
+export class OverlaySystem {
+  private state: OverlayState = { ...DEFAULT_OVERLAY };
+  private readonly listeners = new Set<(state: OverlayState) => void>();
+
+  subscribe(listener: (state: OverlayState) => void): () => void {
+    this.listeners.add(listener);
+    listener(this.state);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  toggle(key: keyof OverlayState): void {
+    this.state = Object.freeze({
+      ...this.state,
+      [key]: !this.state[key],
+    });
+    this.listeners.forEach((listener) => listener(this.state));
+  }
+
+  getState(): OverlayState {
+    return this.state;
+  }
 }
