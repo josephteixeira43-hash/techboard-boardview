@@ -437,31 +437,18 @@ export function createOverlaySystem(): OverlaySystemAPI {
   return Object.freeze(system);
 }
 
-export type OverlayState = {
-  showPads: boolean;
-  showVias: boolean;
-  showTraces: boolean;
-  showNets: boolean;
-  showLabels: boolean;
-  showSilkscreen: boolean;
-  showVoltages: boolean;
-  showGrid: boolean;
-};
-
-export const DEFAULT_OVERLAY: OverlayState = Object.freeze({
-  showPads: true,
-  showVias: true,
-  showTraces: true,
-  showNets: true,
-  showLabels: true,
-  showSilkscreen: true,
-  showVoltages: true,
-  showGrid: false,
-});
-
 // Backward-compatible class export used by page-level imports.
 export class OverlaySystem {
-  private state: OverlayState = { ...DEFAULT_OVERLAY };
+  private state: OverlayState = {
+    showPads: true,
+    showVias: true,
+    showTraces: true,
+    showNets: true,
+    showLabels: true,
+    showSilkscreen: true,
+    showVoltages: true,
+    showGrid: false,
+  };
   private readonly listeners = new Set<(state: OverlayState) => void>();
 
   subscribe(listener: (state: OverlayState) => void): () => void {
@@ -484,3 +471,16 @@ export class OverlaySystem {
     return this.state;
   }
 }
+
+export const DEFAULT_OVERLAY = Object.freeze({
+  showPads: true,
+  showVias: true,
+  showTraces: true,
+  showNets: true,
+  showLabels: true,
+  showSilkscreen: true,
+  showVoltages: true,
+  showGrid: false,
+});
+
+export type OverlayState = Readonly<typeof DEFAULT_OVERLAY>;
