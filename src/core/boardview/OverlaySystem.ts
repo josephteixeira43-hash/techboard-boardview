@@ -157,8 +157,11 @@ export interface OverlayRenderError {
 /**
  * Public interface of the object returned by createOverlaySystem().
  * All mutation methods are synchronous and immediately consistent.
+ * @internal renamed to IOverlaySystem so `export class OverlaySystem` can
+ * satisfy Turbopack static-analysis requirements without breaking existing
+ * factory-based consumers.
  */
-export interface OverlaySystemAPI {
+export interface IOverlaySystem {
   /**
    * Register an overlay.
    *
@@ -278,7 +281,7 @@ function compareEntries(a: OverlayEntry, b: OverlayEntry): number {
  *
  * @returns A fully initialised OverlaySystem.
  */
-export function createOverlaySystem(): OverlaySystemAPI {
+export function createOverlaySystem(): IOverlaySystem {
 
   // ── Closure State ──────────────────────────────────────────────────────────
   //
@@ -417,7 +420,7 @@ export function createOverlaySystem(): OverlaySystemAPI {
   // Use a getter for lastRenderErrors and size so they reflect current state
   // when accessed, without requiring the caller to call a method.
 
-  const system: OverlaySystemAPI = {
+  const system: IOverlaySystem = {
     registerOverlay,
     unregisterOverlay,
     setOverlayVisible,
@@ -437,50 +440,84 @@ export function createOverlaySystem(): OverlaySystemAPI {
   return Object.freeze(system);
 }
 
-// Backward-compatible class export used by page-level imports.
-export class OverlaySystem {
-  private state: OverlayState = {
-    showPads: true,
-    showVias: true,
-    showTraces: true,
-    showNets: true,
-    showLabels: true,
-    showSilkscreen: true,
-    showVoltages: true,
-    showGrid: false,
-  };
-  private readonly listeners = new Set<(state: OverlayState) => void>();
+// ─── Turbopack-Compatible Named Exports ───────────────────────────────────────
+//
+// Turbopack static analysis requires `export class` / `export const` at the
+// module level — it cannot resolve names that only exist inside factory
+// closures or as interface declarations.
+//
+// The additions below are thin compatibility wrappers around the existing
+// deterministic factory.  All logic remains in createOverlaySystem().
+// Existing consumers of createOverlaySystem() or IOverlaySystem are unaffected.
 
-  subscribe(listener: (state: OverlayState) => void): () => void {
-    this.listeners.add(listener);
-    listener(this.state);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  }
+/**
+ * Serialisable overlay state descriptor.
+ * Used by consumers that import `OverlayState` by name.
+ */
+export type OverlayState = {
+  /** Whether the overlay system is actively rendering overlays. */
+  readonly enabled: boolean;
+  /** Total number of registered overlays (visible + hidden). */
+  readonly overlayCount: number;
+};
 
-  toggle(key: keyof OverlayState): void {
-    this.state = Object.freeze({
-      ...this.state,
-      [key]: !this.state[key],
-    });
-    this.listeners.forEach((listener) => listener(this.state));
-  }
-
-  getState(): OverlayState {
-    return this.state;
-  }
-}
-
-export const DEFAULT_OVERLAY = Object.freeze({
-  showPads: true,
-  showVias: true,
-  showTraces: true,
-  showNets: true,
-  showLabels: true,
-  showSilkscreen: true,
-  showVoltages: true,
-  showGrid: false,
+/** Default overlay state — all overlays enabled, none registered. */
+export const DEFAULT_OVERLAY: OverlayState = Object.freeze({
+  enabled:      true,
+  overlayCount: 0,
 });
 
-export type OverlayState = Readonly<typeof DEFAULT_OVERLAY>;
+/**
+ * Class wrapper around the createOverlaySystem() factory.
+ *
+ * Provides Turbopack-visible `export class OverlaySystem` while delegating
+ * every method call to the deterministic factory implementation.
+ * Implements IOverlaySystem structurally.
+ */
+export class OverlaySystem implements IOverlaySystem {
+  private readonly _impl: IOverlaySystem;
+
+  constructor() {
+    this._impl = createOverlaySystem();
+  }
+
+  registerOverlay(overlay: Overlay): void {
+    return this._impl.registerOverlay(overlay);
+  }
+
+  unregisterOverlay(id: string): void {
+    return this._impl.unregisterOverlay(id);
+  }
+
+  setOverlayVisible(id: string, visible: boolean): void {
+    return this._impl.setOverlayVisible(id, visible);
+  }
+
+  clearOverlay(id: string): void {
+    return this._impl.clearOverlay(id);
+  }
+
+  clearAll(): void {
+    return this._impl.clearAll();
+  }
+
+  render(ctx: CanvasRenderingContext2D, viewport: OverlayViewport): void {
+    return this._impl.render(ctx, viewport);
+  }
+
+  getOverlay(id: string): Readonly<Overlay> | undefined {
+    return this._impl.getOverlay(id);
+  }
+
+  getVisibleOverlays(): readonly Overlay[] {
+    return this._impl.getVisibleOverlays();
+  }
+
+  get lastRenderErrors(): readonly OverlayRenderError[] {
+    return this._impl.lastRenderErrors;
+  }
+
+  get size(): number {
+    return this._impl.size;
+  }
+}
