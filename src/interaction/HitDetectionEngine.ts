@@ -114,6 +114,12 @@ export interface BoardComponent {
   readonly height: number;
   /** Rotation in radians about the component centre. 0 = axis-aligned. */
   readonly rotation?: number;
+  /**
+   * PCB layer identifier (e.g. "F.Cu", "B.Cu", "F.SilkS").
+   * Used by the layer registry for getLayerIds / enableLayer / disableLayer.
+   * Optional — components without a layer are assigned to DEFAULT_LAYER.
+   */
+  readonly layer?: string;
   /** Optional pre-computed bounds cache (ignored — engine manages its own). */
   readonly boundsCache?: unknown;
 }
@@ -163,6 +169,28 @@ export interface EngineStats {
   readonly cellSize: number;
   /** Monotonic registration counter (next index to be assigned). */
   readonly nextRegistrationIndex: number;
+  /** Total distinct layer ids tracked. */
+  readonly layerCount: number;
+}
+
+// ─── Layer Registry Types ─────────────────────────────────────────────────────
+
+/**
+ * Fallback layer id assigned to components that carry no layer field.
+ * Stable constant — never changes at runtime.
+ */
+export const DEFAULT_LAYER = 'default' as const;
+
+/**
+ * Snapshot of a single layer's state as returned by getActiveLayers().
+ */
+export interface LayerInfo {
+  /** Layer identifier string. */
+  readonly id:      string;
+  /** True when the layer is enabled (participates in hit queries). */
+  readonly enabled: boolean;
+  /** Number of components assigned to this layer. */
+  readonly componentCount: number;
 }
 
 // ─── Configuration ─────────────────────────────────────────────────────────────
@@ -471,6 +499,24 @@ export class HitDetectionEngine {
    */
   private readonly _candidateSet: Set<number> = new Set();
 
+  // ── Layer Registry ────────────────────────────────────────────────────────
+  //
+  // Tracks which layer ids are known and whether each is enabled.
+  // Populated deterministically from component.layer during registerComponents.
+  // No sorting at registration time — getLayerIds() sorts on demand (stable).
+
+  /**
+   * layer id → enabled flag.
+   * Insertion order = first-seen order across registerComponents calls.
+   */
+  private readonly _layers: Map<string, boolean> = new Map();
+
+  /**
+   * layer id → count of components currently assigned to it.
+   * Decremented on re-registration / clear.
+   */
+  private readonly _layerComponentCount: Map<string, number> = new Map();
+
   // ── Constructor ───────────────────────────────────────────────────────────
 
   /**
@@ -539,6 +585,20 @@ export class HitDetectionEngine {
 
       this._components.set(c.id, rec);
       this._insertIntoGrid(rec);
+
+      // ── Layer registry update ───────────────────────────────────────────
+      const layerId = (typeof c.layer === 'string' && c.layer.trim().length > 0)
+        ? c.layer.trim()
+        : DEFAULT_LAYER;
+      if (!this._layers.has(layerId)) {
+        // First time seeing this layer — enable by default.
+        this._layers.set(layerId, true);
+        this._layerComponentCount.set(layerId, 0);
+      }
+      this._layerComponentCount.set(
+        layerId,
+        (this._layerComponentCount.get(layerId) ?? 0) + 1,
+      );
     }
   }
 
@@ -657,6 +717,8 @@ export class HitDetectionEngine {
     this._grid.clear();
     this._totalInsertions = 0;
     this._candidateSet.clear();
+    this._layers.clear();
+    this._layerComponentCount.clear();
   }
 
   /**
@@ -670,6 +732,7 @@ export class HitDetectionEngine {
       totalInsertions:       this._totalInsertions,
       cellSize:              this._cellSize,
       nextRegistrationIndex: this._nextRegistrationIndex,
+      layerCount:            this._layers.size,
     });
   }
 
@@ -803,5 +866,267 @@ export class HitDetectionEngine {
       : results;
 
     return Object.freeze(out);
+  }
+
+  // ── Layer API ─────────────────────────────────────────────────────────────
+  //
+  // Compatibility layer required by runtime consumers (e.g. useBoardInteraction).
+  // All methods are deterministic, never throw, and return stable frozen values.
+  // Layer state is tracked in _layers (id → enabled) populated during
+  // registerComponents from each component's optional `layer` field.
+
+  /**
+   * Return a frozen, lexically sorted array of all known layer ids.
+   *
+   * Overloaded to accept optional (components, activeLayer) args from
+   * useBoardInteraction — the arguments are used to ensure the layer
+   * registry is up to date, then the sorted ids are returned.
+   *
+   * @param components  Optional — re-registers components if provided.
+   * @param activeLayer Optional — active layer hint (included in result).
+   * @returns Frozen string[] — empty array when no components registered.
+   */
+  getLayerIds(
+    components?: readonly BoardComponent[],
+    activeLayer?: string,
+  ): readonly string[] {
+    // If a fresh component list is provided, sync the layer registry.
+    if (Array.isArray(components) && components.length > 0) {
+      for (let i = 0; i < components.length; i++) {
+        const c = components[i];
+        if (!c || typeof c !== 'object') continue;
+        const layerId = (typeof c.layer === 'string' && c.layer.trim().length > 0)
+          ? c.layer.trim()
+          : DEFAULT_LAYER;
+        if (!this._layers.has(layerId)) {
+          this._layers.set(layerId, true);
+          this._layerComponentCount.set(layerId, 0);
+        }
+      }
+    }
+    // Ensure the activeLayer is always present in the result.
+    if (typeof activeLayer === 'string' && activeLayer.trim().length > 0) {
+      const al = activeLayer.trim();
+      if (!this._layers.has(al)) {
+        this._layers.set(al, true);
+        this._layerComponentCount.set(al, 0);
+      }
+    }
+    if (this._layers.size === 0) return Object.freeze([]);
+    const ids: string[] = [];
+    this._layers.forEach((_, id) => ids.push(id));
+    ids.sort();
+    return Object.freeze(ids);
+  }
+
+  /**
+   * Rebuild the spatial index from a fresh component list.
+   *
+   * Accepts the useBoardInteraction call signature:
+   *   rebuild(components, positions, activeLayer)
+   *
+   * Clears the existing index and re-registers all valid components.
+   * Positions map is used to update x/y coordinates when available.
+   * Never throws.
+   *
+   * @param components   Array of board components to index.
+   * @param positions    Optional Map<id, {x,y}> of computed positions.
+   * @param activeLayer  Active layer string hint (tracked in layer registry).
+   */
+  rebuild(
+    components: readonly BoardComponent[],
+    positions?: Map<string, { x: number; y: number }> | null,
+    activeLayer?: string,
+  ): void {
+    try {
+      this.clear();
+
+      if (!Array.isArray(components) || components.length === 0) return;
+
+      // Build a merged component list, patching x/y from positions when present.
+      const patched: BoardComponent[] = [];
+      for (let i = 0; i < components.length; i++) {
+        const c = components[i];
+        if (!c || typeof c !== 'object') continue;
+        const pos = positions?.get(c.id);
+        if (pos && isFinite(pos.x) && isFinite(pos.y)) {
+          // Spread onto a plain object to satisfy readonly interface.
+          patched.push({ ...c, x: pos.x, y: pos.y } as BoardComponent);
+        } else {
+          patched.push(c);
+        }
+      }
+
+      this.registerComponents(patched);
+
+      // Ensure active layer is tracked.
+      if (typeof activeLayer === 'string' && activeLayer.trim().length > 0) {
+        const al = activeLayer.trim();
+        if (!this._layers.has(al)) {
+          this._layers.set(al, true);
+          this._layerComponentCount.set(al, 0);
+        }
+      }
+    } catch {
+      // Never propagate — graceful degradation.
+    }
+  }
+
+  /**
+   * Fast single-cell point lookup — checks only the grid cell containing
+   * the screen point after transforming to board-space via viewport.
+   *
+   * Returns the first matching component (nearest-centre priority) or null.
+   * Never throws.
+   *
+   * @param screen      Screen-space point {x, y}.
+   * @param viewport    Viewport descriptor with scale/translateX/translateY.
+   * @param coordEngine Ignored — present for call-site signature compatibility.
+   */
+  findAtFast(
+    screen:      { x: number; y: number },
+    viewport:    { scale?: number; zoom?: number; translateX?: number; translateY?: number; offsetX?: number; offsetY?: number } | null,
+    coordEngine?: unknown,
+  ): BoardComponent | null {
+    try {
+      const board = this._screenToBoard(screen, viewport);
+      const hits  = this.queryPoint(board, { maxResults: 1 });
+      return hits.length > 0 ? hits[0].component as BoardComponent : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Full point lookup with layer filtering.
+   *
+   * Transforms screen point to board-space, queries all hits, then filters
+   * to components whose layer is in layerIds (if provided and non-empty).
+   * Returns the nearest-centre match or null.
+   * Never throws.
+   *
+   * @param screen      Screen-space point {x, y}.
+   * @param viewport    Viewport descriptor.
+   * @param coordEngine Ignored — signature compatibility.
+   * @param layerIds    Allowed layer ids. If empty/absent all layers pass.
+   */
+  findAt(
+    screen:      { x: number; y: number },
+    viewport:    { scale?: number; zoom?: number; translateX?: number; translateY?: number; offsetX?: number; offsetY?: number } | null,
+    coordEngine?: unknown,
+    layerIds?:   readonly string[],
+  ): BoardComponent | null {
+    try {
+      const board   = this._screenToBoard(screen, viewport);
+      const hits    = this.queryPoint(board);
+      const filter  = Array.isArray(layerIds) && layerIds.length > 0;
+
+      for (let i = 0; i < hits.length; i++) {
+        const comp = hits[i].component as BoardComponent;
+        if (!filter) return comp;
+        const compLayer = (typeof comp.layer === 'string' && comp.layer.trim().length > 0)
+          ? comp.layer.trim()
+          : DEFAULT_LAYER;
+        if ((layerIds as string[]).includes(compLayer)) return comp;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Private: Screen → Board Transform ────────────────────────────────────
+
+  /**
+   * Convert a screen-space point to board-space using the viewport descriptor.
+   * Supports both ViewportManager shape (scale/translateX/Y) and legacy shape
+   * (zoom/offsetX/Y).  Falls back to identity if viewport is absent/malformed.
+   */
+  private _screenToBoard(
+    screen:   { x: number; y: number },
+    viewport: { scale?: number; zoom?: number; translateX?: number; translateY?: number; offsetX?: number; offsetY?: number } | null | undefined,
+  ): Point {
+    if (!viewport) return { x: screen.x, y: screen.y };
+    const zoom = viewport.scale ?? viewport.zoom ?? 1
+    const ox   = viewport.translateX ?? viewport.offsetX ?? (viewport as any).panX ?? 0
+    const oy   = viewport.translateY ?? viewport.offsetY ?? (viewport as any).panY ?? 0
+    const safeZoom = (isFinite(zoom) && zoom > 0) ? zoom : 1;
+    return {
+      x: (screen.x - ox) / safeZoom,
+      y: (screen.y - oy) / safeZoom,
+    };
+  }
+
+  // ── Existing Layer API (getActiveLayers / hasLayer / enableLayer / disableLayer) ─
+
+  /**
+   * Return a frozen, lexically sorted array of LayerInfo snapshots for all
+   * layers that are currently enabled.
+   *
+   * @returns Frozen LayerInfo[] — empty array when no layers are enabled
+   *          or no components are registered.
+   */
+  getActiveLayers(): readonly LayerInfo[] {
+    if (this._layers.size === 0) return Object.freeze([]);
+    const active: LayerInfo[] = [];
+    this._layers.forEach((enabled, id) => {
+      if (!enabled) return;
+      active.push(Object.freeze({
+        id,
+        enabled:        true,
+        componentCount: this._layerComponentCount.get(id) ?? 0,
+      }));
+    });
+    active.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    return Object.freeze(active);
+  }
+
+  /**
+   * Return true if the given layer id is known (was seen during registration).
+   *
+   * @param layerId  Layer identifier to test.
+   * @returns boolean — false for unknown ids, never throws.
+   */
+  hasLayer(layerId: string): boolean {
+    if (typeof layerId !== 'string') return false;
+    return this._layers.has(layerId);
+  }
+
+  /**
+   * Enable a layer so its components participate in hit queries.
+   *
+   * If the layer id is not yet known it is registered as enabled, ready to
+   * accept components in a future registerComponents() call.
+   *
+   * No-op if the layer is already enabled.
+   * Never throws.
+   *
+   * @param layerId  Layer identifier to enable.
+   */
+  enableLayer(layerId: string): void {
+    if (typeof layerId !== 'string' || layerId.trim().length === 0) return;
+    const id = layerId.trim();
+    this._layers.set(id, true);
+    if (!this._layerComponentCount.has(id)) {
+      this._layerComponentCount.set(id, 0);
+    }
+  }
+
+  /**
+   * Disable a layer so its components are excluded from hit queries.
+   *
+   * Components remain registered in the spatial index — re-enabling the
+   * layer immediately restores them without re-registration.
+   *
+   * No-op if the layer is already disabled or unknown.
+   * Never throws.
+   *
+   * @param layerId  Layer identifier to disable.
+   */
+  disableLayer(layerId: string): void {
+    if (typeof layerId !== 'string' || layerId.trim().length === 0) return;
+    const id = layerId.trim();
+    if (!this._layers.has(id)) return;
+    this._layers.set(id, false);
   }
 }

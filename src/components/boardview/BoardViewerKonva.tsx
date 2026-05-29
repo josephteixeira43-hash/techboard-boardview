@@ -75,21 +75,18 @@ export default function BoardViewerKonva({
     if (!el) return
     const ro = new ResizeObserver(e => {
       const { width, height } = e[0].contentRect
-      setSize({ w: Math.round(width), h: Math.round(height) })
+      const w = Math.max(1, Math.round(width))
+      const h = Math.max(1, Math.round(height))
+      if (canvasRef.current) { canvasRef.current.width = w; canvasRef.current.height = h }
+      setSize({ w, h })
     })
     ro.observe(el)
-    setSize({ w: el.clientWidth, h: el.clientHeight })
+    const w = Math.max(1, el.clientWidth || 800)
+    const h = Math.max(1, el.clientHeight || 600)
+    if (canvasRef.current) { canvasRef.current.width = w; canvasRef.current.height = h }
+    setSize({ w, h })
     return () => ro.disconnect()
   }, [viewportRef])
-
-  // Background PCB
-  useEffect(() => {
-    const c = bgRef.current
-    if (!c) return
-    c.width = BOARD_W; c.height = BOARD_H
-    const ctx = c.getContext('2d')!
-    renderer.current.drawBoardTexture(ctx, BOARD_W, BOARD_H)
-  }, [])
 
   // Imagem da placa
   useEffect(() => {
@@ -183,7 +180,8 @@ export default function BoardViewerKonva({
     }
 
     // ── COMPONENTES ──────────────────────────────────────────────────────────
-    const visComps = components.filter(c => c.side === activeLayer)
+    const hasSides = components.some(c => c.side === 'top' || c.side === 'bottom' || c.side === 'sub_top' || c.side === 'sub_bottom')
+    const visComps = hasSides ? components.filter(c => c.side === activeLayer) : components
     visComps.forEach(comp => {
       const pos = positions.get(comp.id)
       if (!pos) return
@@ -255,7 +253,8 @@ export default function BoardViewerKonva({
       }
     }
 
-    components.filter(c=>c.side===activeLayer).forEach(comp=>{
+    const _hasSides = components.some(c => c.side === 'top' || c.side === 'bottom')
+    components.filter(c=> !_hasSides || c.side===activeLayer).forEach(comp=>{
       const pos=positions.get(comp.id); if(!pos) return
       const hl=highlights.get(comp.id)
       const [r,g,b] = hexToRgb(hl?.color||'#2a4a3a')
@@ -289,6 +288,7 @@ export default function BoardViewerKonva({
     <div
       ref={viewportRef}
       style={{ flex:1, position:'relative', overflow:'hidden',
+        height:'100%', minHeight:0,
         cursor: isDragging?'grabbing':'grab',
         background:'#030608', userSelect:'none' }}
       onMouseDown={onMouseDown}

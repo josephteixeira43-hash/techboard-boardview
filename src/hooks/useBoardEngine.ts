@@ -1,6 +1,6 @@
 'use client'
-// src/hooks/useBoardEngine.ts — v3
-// Integrado com NetEngine — passa conexões reais para o BoardViewerKonva
+// src/hooks/useBoardEngine.ts — v5
+// Fix: findComponentAtScreen usa positionsRef (sync) + vpManager.screenToBoard()
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { BoardComponent, ViewportState, ComputedPosition, ComponentHighlight, BoardNet } from '@/types/board'
@@ -16,42 +16,62 @@ export function useBoardEngine(components: BoardComponent[]) {
   const hlEngine    = useMemo(() => new HighlightEngine(), [])
   const netEng      = useMemo(() => new NetEngine(), [])
 
-  const viewportRef = useRef<HTMLDivElement>(null)
-  const isDragging  = useRef(false)
-  const dragStart   = useRef({ x: 0, y: 0, panX: 0, panY: 0 })
-  const didDrag     = useRef(false)
+  const viewportRef  = useRef<HTMLDivElement>(null)
+  const isDragging   = useRef(false)
+  const dragStart    = useRef({ x: 0, y: 0, panX: 0, panY: 0 })
+  const didDrag      = useRef(false)
+  // positionsRef: sempre sincronizado com computePositions — não depende de ciclo React
+  const positionsRef = useRef<Map<string, ComputedPosition>>(new Map())
+  // activeLayerRef: espelho síncrono do state activeLayer para uso em callbacks sem closure stale
+  const activeLayerRef = useRef<'top' | 'bottom' | 'sub_top' | 'sub_bottom'>('top')
 
-  const [viewport,    setViewport]    = useState<ViewportState>({ zoom: 1, panX: 0, panY: 0 })
-  const [highlights,  setHighlights]  = useState<Map<string, ComponentHighlight>>(new Map())
-  const [positions,   setPositions]   = useState<Map<string, ComputedPosition>>(new Map())
-  const [nets,        setNets]        = useState<BoardNet[]>([])
-  const [selected,    setSelected]    = useState<BoardComponent | null>(null)
+  const [viewport,     setViewport]     = useState<ViewportState>({ zoom: 1, panX: 0, panY: 0 })
+  const [highlights,   setHighlights]   = useState<Map<string, ComponentHighlight>>(new Map())
+  const [positions,    setPositions]    = useState<Map<string, ComputedPosition>>(new Map())
+  const [nets,         setNets]         = useState<BoardNet[]>([])
+  const [selected,     setSelected]     = useState<BoardComponent | null>(null)
   const [connectedIds, setConnectedIds] = useState<string[]>([])
-  const [netColor,    setNetColor]    = useState('#00d4ff')
-  const [netName,     setNetName]     = useState('GND')
-  const [netVoltage,  setNetVoltage]  = useState('0V')
-  const [activeLayer, setActiveLayer] = useState<'top' | 'bottom' | 'sub_top' | 'sub_bottom'>('top')
+  const [netColor,     setNetColor]     = useState('#00d4ff')
+  const [netName,      setNetName]      = useState('GND')
+  const [netVoltage,   setNetVoltage]   = useState('0V')
+  const [activeLayer,  setActiveLayerState] = useState<'top' | 'bottom' | 'sub_top' | 'sub_bottom'>('top')
 
-  // Computa posições e NETs
+  // Wrapper que mantém ref e state sincronizados
+  const setActiveLayer = useCallback((layer: 'top' | 'bottom' | 'sub_top' | 'sub_bottom') => {
+    activeLayerRef.current = layer
+    setActiveLayerState(layer)
+  }, [])
+
+  // ─── Computa posições e NETs — síncrono, popula positionsRef antes de qualquer render ───
   useEffect(() => {
     if (!components.length) return
-    setPositions(new Map(coordEngine.computePositions(components)))
-    const builtNets = netEng.buildNets(components)
-    setNets(builtNets)
+    const computed = coordEngine.computePositions(components)
+    const map = computed instanceof Map ? computed : new Map(computed)
+    positionsRef.current = map
+    setPositions(map)
+    setNets(netEng.buildNets(components))
   }, [components, coordEngine, netEng])
 
-  // Sync viewport e highlights
+  // ─── Reset viewport ───
+  useEffect(() => {
+    if (!components.length) return
+    const doReset = () => {
+      const el = viewportRef.current
+      const w = el?.clientWidth  || window.innerWidth  - 240
+      const h = el?.clientHeight || window.innerHeight - 60
+      vpManager.reset(w, h, BOARD_W, BOARD_H)
+    }
+    doReset()
+    const id1 = requestAnimationFrame(doReset)
+    const id2 = setTimeout(doReset, 100)
+    return () => { cancelAnimationFrame(id1); clearTimeout(id2) }
+  }, [components.length, vpManager])
+
+  // ─── Sync viewport e highlights para React state ───
   useEffect(() => vpManager.subscribe(setViewport), [vpManager])
   useEffect(() => hlEngine.subscribe(setHighlights), [hlEngine])
 
-  // Reset view ao carregar
-  useEffect(() => {
-    if (!components.length || !viewportRef.current) return
-    const { clientWidth, clientHeight } = viewportRef.current
-    vpManager.reset(clientWidth, clientHeight, BOARD_W, BOARD_H)
-  }, [components.length, vpManager])
-
-  // Wheel zoom
+  // ─── Wheel zoom ───
   useEffect(() => {
     const el = viewportRef.current
     if (!el) return
@@ -64,7 +84,7 @@ export function useBoardEngine(components: BoardComponent[]) {
     return () => el.removeEventListener('wheel', onWheel)
   }, [vpManager])
 
-  // Drag
+  // ─── Drag (pan) ───
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return
     isDragging.current = true
@@ -87,7 +107,7 @@ export function useBoardEngine(components: BoardComponent[]) {
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
   }, [vpManager])
 
-  // Selecionar componente
+  // ─── Selecionar componente ───
   const selectComponent = useCallback((comp: BoardComponent | null) => {
     if (!comp) {
       setSelected(null)
@@ -103,7 +123,6 @@ export function useBoardEngine(components: BoardComponent[]) {
     setSelected(comp)
     setActiveLayer(comp.side as any)
 
-    // NET data
     const connected = netEng.getConnectedComponents(comp.id)
     const color     = netEng.getNetColor(comp.id)
     const name      = netEng.getNetName(comp.id)
@@ -114,35 +133,34 @@ export function useBoardEngine(components: BoardComponent[]) {
     setNetName(name)
     setNetVoltage(voltage)
 
-    // Highlights
     hlEngine.selectComponent(comp.id, comp.category, connected)
 
-    // Contexto IA
+    const pos = positionsRef.current.get(comp.id)
     updateBoardviewContext({
       name:           comp.name,
       category:       comp.category,
       part_code:      comp.part_code,
       description:    comp.description,
       side:           comp.side,
-      x:              positions.get(comp.id)?.x,
-      y:              positions.get(comp.id)?.y,
+      x:              pos?.x,
+      y:              pos?.y,
       electricalLine: comp.electrical_line,
       voltage:        voltage,
       commonFaults:   comp.common_faults,
     })
-  }, [hlEngine, netEng, positions])
+  }, [hlEngine, netEng, setActiveLayer])
 
-  // Centralizar
+  // ─── Centralizar ───
   const centerOnComponent = useCallback((comp: BoardComponent, targetZoom?: number) => {
-    const pos = positions.get(comp.id)
+    const pos = positionsRef.current.get(comp.id)
     const el  = viewportRef.current
     if (!pos || !el) return
     const zoom = targetZoom ?? Math.max(vpManager.getState().zoom, 1)
     const dim = getComputedDimensions(pos)
     vpManager.centerOn(pos.x + dim.width / 2, pos.y + dim.height / 2, el.clientWidth, el.clientHeight, zoom)
-  }, [positions, vpManager])
+  }, [vpManager])
 
-  // Focar por nome
+  // ─── Focar por nome ───
   const focusComponent = useCallback((name: string) => {
     const comp = components.find(c => c.name.toLowerCase() === name.toLowerCase())
     if (!comp) return
@@ -150,32 +168,50 @@ export function useBoardEngine(components: BoardComponent[]) {
     requestAnimationFrame(() => centerOnComponent(comp, Math.max(vpManager.getState().zoom, 1.2)))
   }, [components, selectComponent, centerOnComponent, vpManager])
 
-  // Reset view
+  // ─── Reset view ───
   const resetView = useCallback(() => {
     const el = viewportRef.current
-    if (!el) return
-    vpManager.reset(el.clientWidth, el.clientHeight, BOARD_W, BOARD_H)
+    const w = el?.clientWidth  || window.innerWidth  - 240
+    const h = el?.clientHeight || window.innerHeight - 60
+    vpManager.reset(w, h, BOARD_W, BOARD_H)
   }, [vpManager])
 
-  // Hit testing para canvas 2D
+  // ─── Hit testing — CORE FIX ───
+  // 1. Usa vpManager.screenToBoard() para transformar coordenadas corretamente
+  // 2. Usa positionsRef.current (ref síncrona) — nunca stale
+  // 3. Usa activeLayerRef.current para evitar closure stale
+  // 4. Aplica fallback de dimensões via getComputedDimensions
   const findComponentAtScreen = useCallback((sx: number, sy: number): BoardComponent | null => {
-    const vp = vpManager.getState()
-    const cx = (sx - vp.panX) / vp.zoom
-    const cy = (sy - vp.panY) / vp.zoom
-    for (const comp of components.filter(c => c.side === activeLayer)) {
-      const pos = positions.get(comp.id)
+    // Converte screen → board-space usando a mesma transform do canvas
+    const { x: bx, y: by } = vpManager.screenToBoard(sx, sy)
+
+    const hasSides = components.some(
+      c => c.side === 'top' || c.side === 'bottom' || c.side === 'sub_top' || c.side === 'sub_bottom'
+    )
+    const currentLayer = activeLayerRef.current
+    const pool = hasSides ? components.filter(c => c.side === currentLayer) : components
+
+    // Itera em ordem reversa para priorizar componentes renderizados por cima (último = topo)
+    for (let i = pool.length - 1; i >= 0; i--) {
+      const comp = pool[i]
+      const pos = positionsRef.current.get(comp.id)
       if (!pos) continue
-      if (cx >= pos.x && cx <= pos.x + COMP_W && cy >= pos.y && cy <= pos.y + COMP_H) return comp
+
+      const dim = getComputedDimensions(pos)
+      const w = dim.width  || COMP_W
+      const h = dim.height || COMP_H
+
+      // Hit test em board-space — mesmas coordenadas usadas pelo renderer
+      if (bx >= pos.x && bx <= pos.x + w && by >= pos.y && by <= pos.y + h) {
+        return comp
+      }
     }
     return null
-  }, [components, positions, activeLayer, vpManager])
+  }, [components, vpManager])  // positionsRef e activeLayerRef são refs — não precisam ser deps
 
-  // Click
+  // ─── Click ───
   const consumeDragClick = useCallback(() => {
-    if (didDrag.current) {
-      didDrag.current = false
-      return true
-    }
+    if (didDrag.current) { didDrag.current = false; return true }
     return false
   }, [])
 
@@ -213,6 +249,7 @@ export function useBoardEngine(components: BoardComponent[]) {
     onMouseDown,
     onCanvasClick,
     consumeDragClick,
+    findComponentAtScreen,
     coordEngine,
     vpManager,
     hlEngine,

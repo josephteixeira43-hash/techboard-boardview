@@ -521,7 +521,7 @@ function BoardViewContent() {
           sideComponents={sideComponents} categoryCounts={categoryCounts}
         />
 
-        <div className="flex-1 relative overflow-hidden">
+        <div className="flex-1 relative overflow-hidden" style={{minHeight:0}}>
           <BoardViewer
             components={components}
             positions={engine.positions}

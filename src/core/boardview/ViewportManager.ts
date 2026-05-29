@@ -26,6 +26,34 @@ export class ViewportManager {
   }
 
   /**
+   * Converte coordenadas de tela (pixels do viewport) para board-space.
+   * Inverso exato da transform aplicada no canvas:
+   *   screenX = boardX * zoom + panX
+   *   screenY = boardY * zoom + panY
+   * Portanto:
+   *   boardX = (screenX - panX) / zoom
+   *   boardY = (screenY - panY) / zoom
+   */
+  screenToBoard(screenX: number, screenY: number): { x: number; y: number } {
+    const { zoom, panX, panY } = this.state
+    return {
+      x: (screenX - panX) / zoom,
+      y: (screenY - panY) / zoom,
+    }
+  }
+
+  /**
+   * Converte coordenadas de board-space para tela.
+   */
+  boardToScreen(boardX: number, boardY: number): { x: number; y: number } {
+    const { zoom, panX, panY } = this.state
+    return {
+      x: boardX * zoom + panX,
+      y: boardY * zoom + panY,
+    }
+  }
+
+  /**
    * Zoom ao redor de um ponto da tela (cursor).
    * Mantém o ponto sob o cursor estacionário durante o zoom.
    */

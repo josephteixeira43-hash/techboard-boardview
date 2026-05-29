@@ -463,9 +463,17 @@ export type OverlayState = {
 
 /** Default overlay state — all overlays enabled, none registered. */
 export const DEFAULT_OVERLAY: OverlayState = Object.freeze({
-  enabled:      true,
-  overlayCount: 0,
-});
+  enabled:        true,
+  overlayCount:   0,
+  showPads:       true,
+  showVias:       true,
+  showTraces:     true,
+  showNets:       true,
+  showLabels:     true,
+  showSilkscreen: true,
+  showVoltages:   false,
+  showGrid:       false,
+})
 
 /**
  * Class wrapper around the createOverlaySystem() factory.
@@ -519,5 +527,69 @@ export class OverlaySystem implements IOverlaySystem {
 
   get size(): number {
     return this._impl.size;
+  }
+
+  // ── Consumer Compatibility Methods ─────────────────────────────────────────
+  //
+  // Called by page.tsx and InteractiveBoardCanvas.tsx.
+  // These manage OverlayState (the plain UI state object) independently
+  // from the deterministic overlay render pipeline.
+
+  /**
+   * Subscribe to OverlayState changes.
+   * Mirrors the ViewportManager / HighlightEngine pattern used in useBoardEngine.
+   *
+   * @param fn  Callback fired immediately with current state and on every change.
+   * @returns   Unsubscribe function — call it in useEffect cleanup.
+   */
+  subscribe(fn: (state: OverlayState) => void): () => void {
+    this._stateListeners.push(fn);
+    // Fire immediately with current state so the caller is in sync.
+    try { fn({ ...this._overlayState }); } catch { /* ignore */ }
+    return () => {
+      this._stateListeners = this._stateListeners.filter(l => l !== fn);
+    };
+  }
+
+  /**
+   * Toggle a boolean key in OverlayState and notify all subscribers.
+   *
+   * @param key  Key of OverlayState to flip.
+   */
+  toggle(key: keyof OverlayState): void {
+    if (!(key in this._overlayState)) return;
+    (this._overlayState as Record<string, unknown>)[key] =
+      !(this._overlayState as Record<string, unknown>)[key];
+    this._notifyState();
+  }
+
+  /**
+   * Set the currently hovered component id.
+   * Used by InteractiveBoardCanvas to sync hover state into the overlay system.
+   *
+   * @param id  Component id, or null to clear hover.
+   */
+  setHovered(id: string | null): void {
+    this._hoveredId = typeof id === 'string' ? id : null;
+  }
+
+  /**
+   * Get the currently hovered component id, or null.
+   */
+  getHovered(): string | null {
+    return this._hoveredId;
+  }
+
+  // ── Private State for Consumer API ─────────────────────────────────────────
+
+  private _overlayState: OverlayState = { ...DEFAULT_OVERLAY };
+  private _stateListeners: Array<(state: OverlayState) => void> = [];
+  private _hoveredId: string | null = null;
+
+  private _notifyState(): void {
+    const snap = { ...this._overlayState };
+    for (let i = 0; i < this._stateListeners.length; i++) {
+      try { this._stateListeners[i](snap); } catch { /* never propagate */ }
+    }
   }
 }

@@ -1,3 +1,5 @@
+import { PCBCanvas } from '@/rendering/board/PCBCanvas'
+
 /**
  * InteractiveBoardCanvas.tsx
  * src/components/boardview/InteractiveBoardCanvas.tsx

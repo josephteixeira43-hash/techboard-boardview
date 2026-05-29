@@ -1,9 +1,10 @@
 'use client'
+// src/hooks/useBoardInteraction.ts — v6
+// Fix: metaEngine.build não existe — usa registerComponents + getComponentById
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { BoardComponent } from '@/types/board'
-import type { ComponentMetadata, SearchMatch, TooltipState } from '@/types/interaction'
-import { HitDetectionEngine } from '@/interaction/HitDetectionEngine'
+import type { SearchMatch, TooltipState } from '@/types/interaction'
 import { ComponentMetadataEngine } from '@/interaction/ComponentMetadataEngine'
 import { ComponentSearchEngine } from '@/interaction/ComponentSearchEngine'
 import { CameraAnimator } from '@/interaction/CameraAnimator'
@@ -17,60 +18,90 @@ interface Options {
   deviceId?: string
 }
 
-export function useBoardInteraction({ engine, components, deviceId }: Options) {
-  const hitEngine = useMemo(() => new HitDetectionEngine(), [])
-  const metaEngine = useMemo(() => new ComponentMetadataEngine(), [])
-  const searchEngine = useMemo(() => new ComponentSearchEngine(), [])
-  const camera = useMemo(() => new CameraAnimator(), [])
+// ComponentMetadata compatível com o que ComponentInspectorPanel espera
+export interface ComponentMetadata {
+  id: string
+  name: string
+  category: string
+  part_code?: string | null
+  description?: string | null
+  side?: string | null
+  electrical_line?: string | null
+  common_faults?: string | null
+  x?: number
+  y?: number
+  voltage?: string
+}
 
-  const [hovered, setHovered] = useState<BoardComponent | null>(null)
-  const [tooltip, setTooltip] = useState<TooltipState>({
+export function useBoardInteraction({ engine, components, deviceId }: Options) {
+  const metaEngine   = useMemo(() => new ComponentMetadataEngine(), [])
+  const searchEngine = useMemo(() => new ComponentSearchEngine(), [])
+  const camera       = useMemo(() => new CameraAnimator(), [])
+
+  const [hovered,        setHovered]        = useState<BoardComponent | null>(null)
+  const [tooltip,        setTooltip]        = useState<TooltipState>({
     visible: false,
     screenX: 0,
     screenY: 0,
     metadata: null,
   })
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([])
-  const [recentSearches, setRecentSearches] = useState<string[]>([])
-  const [searchFocusId, setSearchFocusId] = useState<string | null>(null)
+  const [searchQuery,      setSearchQuery]      = useState('')
+  const [searchMatches,    setSearchMatches]    = useState<SearchMatch[]>([])
+  const [recentSearches,   setRecentSearches]   = useState<string[]>([])
+  const [searchFocusId,    setSearchFocusId]    = useState<string | null>(null)
   const [errorComponentId, setErrorComponentId] = useState<string | null>(null)
   const pulseRef = useRef(0)
 
-  const layerIds = useMemo(
-    () => hitEngine.getLayerIds(components, engine.activeLayer),
-    [components, engine.activeLayer, hitEngine]
-  )
-
+  // ─── Indexa metaEngine e searchEngine quando components mudam ───
   useEffect(() => {
-    hitEngine.rebuild(components, engine.positions, engine.activeLayer)
+    if (!components.length) return
+    // Mapeia BoardComponent → RawComponent para o metaEngine
+    metaEngine.registerComponents(
+      components.map(c => ({
+        id:        c.id,
+        reference: c.name,
+        value:     c.part_code  ?? '',
+        type:      c.category   ?? '',
+        layer:     c.side       ?? '',
+        tags:      c.electrical_line ? [c.electrical_line] : [],
+      }))
+    )
     searchEngine.build(components, engine.netEng)
     setRecentSearches(searchEngine.getRecent())
-  }, [components, engine.positions, engine.activeLayer, hitEngine, searchEngine, engine.netEng])
+  }, [components, engine.netEng, metaEngine, searchEngine])
 
-  useEffect(() => {
-    engine.coordEngine.computePositions(components)
-  }, [components, engine.coordEngine])
-
+  // ─── Metadata — monta objeto a partir do BoardComponent + posições ───
+  // Não usa metaEngine.build (não existe) — constrói diretamente do BoardComponent
   const getMetadata = useCallback(
     (comp: BoardComponent | null): ComponentMetadata | null => {
       if (!comp) return null
-      const pos = engine.positions.get(comp.id) ?? null
-      return metaEngine.build(comp, pos, engine.netEng)
+      const pos = engine.positions.get(comp.id)
+      return {
+        id:             comp.id,
+        name:           comp.name,
+        category:       comp.category,
+        part_code:      comp.part_code      ?? null,
+        description:    comp.description    ?? null,
+        side:           comp.side           ?? null,
+        electrical_line: comp.electrical_line ?? null,
+        common_faults:  comp.common_faults  ?? null,
+        x:              pos?.x,
+        y:              pos?.y,
+        voltage:        engine.netVoltage,
+      }
     },
-    [engine.positions, engine.netEng, metaEngine]
+    [engine.positions, engine.netVoltage]
   )
 
+  // ─── Hit testing — delega para engine.findComponentAtScreen ───
   const findAtScreen = useCallback(
-    (screenX: number, screenY: number) => {
-      const screen = { x: screenX, y: screenY }
-      const fast = hitEngine.findAtFast(screen, engine.viewport, engine.coordEngine)
-      if (fast) return fast
-      return hitEngine.findAt(screen, engine.viewport, engine.coordEngine, layerIds)
+    (screenX: number, screenY: number): BoardComponent | null => {
+      return engine.findComponentAtScreen(screenX, screenY)
     },
-    [hitEngine, engine.viewport, engine.coordEngine, layerIds]
+    [engine]
   )
 
+  // ─── Pointer move — hover + tooltip ───
   const handlePointerMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const rect = e.currentTarget.getBoundingClientRect()
@@ -84,12 +115,7 @@ export function useBoardInteraction({ engine, components, deviceId }: Options) {
 
       if (comp && comp.id !== engine.selected?.id) {
         const meta = getMetadata(comp)
-        setTooltip({
-          visible: true,
-          screenX: sx,
-          screenY: sy,
-          metadata: meta,
-        })
+        setTooltip({ visible: true, screenX: sx, screenY: sy, metadata: meta })
       } else if (!comp) {
         setTooltip((t) => ({ ...t, visible: false, metadata: null }))
       }
@@ -97,11 +123,13 @@ export function useBoardInteraction({ engine, components, deviceId }: Options) {
     [findAtScreen, hovered?.id, engine.selected?.id, getMetadata]
   )
 
+  // ─── Pointer leave ───
   const handlePointerLeave = useCallback(() => {
     setHovered(null)
     setTooltip((t) => ({ ...t, visible: false, metadata: null }))
   }, [])
 
+  // ─── Canvas click ───
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (engine.consumeDragClick()) return
@@ -129,6 +157,7 @@ export function useBoardInteraction({ engine, components, deviceId }: Options) {
     [findAtScreen, engine, camera]
   )
 
+  // ─── Focar componente por nome ───
   const focusComponent = useCallback(
     (name: string, options?: { fromSearch?: boolean; markError?: boolean }) => {
       const comp = components.find(
@@ -175,6 +204,7 @@ export function useBoardInteraction({ engine, components, deviceId }: Options) {
     [components, engine, camera, searchEngine]
   )
 
+  // ─── Search ───
   const runSearch = useCallback(
     (query: string) => {
       setSearchQuery(query)
@@ -201,10 +231,7 @@ export function useBoardInteraction({ engine, components, deviceId }: Options) {
   )
 
   useEffect(() => {
-    if (searchQuery.length < 1) {
-      setSearchMatches([])
-      return
-    }
+    if (searchQuery.length < 1) { setSearchMatches([]); return }
     const t = setTimeout(() => runSearch(searchQuery), 120)
     return () => clearTimeout(t)
   }, [searchQuery, runSearch])
